@@ -4,46 +4,21 @@ import subprocess
 import zipfile
 import uuid
 import shutil
-import time  # Thêm thư viện time
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-# --- Cấu hình cho server ---
-# Thư mục này sẽ được tạo trên Render Disk để lưu trữ dữ liệu
-DATA_DIRECTORY_ON_SERVER = "/data/data_input"
+# --- Cấu hình cho server (sử dụng bộ nhớ tạm) ---
+# Tạo một thư mục ngay tại thư mục gốc của ứng dụng
+DATA_DIRECTORY_ON_SERVER = os.path.join(os.getcwd(), "data_input")
 
-# --- LOGIC MỚI: Chờ cho thư mục Disk được mount ---
-def wait_for_disk_mount(directory_path, timeout=60):
-    """
-    Chờ cho đến khi thư mục được chỉ định xuất hiện (được mount).
-    Hàm sẽ thử kiểm tra mỗi giây cho đến khi hết thời gian chờ.
-    """
-    start_time = time.time()
-    while not os.path.exists(directory_path):
-        if time.time() - start_time > timeout:
-            print(f"LỖI NGHIÊM TRỌNG: Thư mục disk '{directory_path}' không xuất hiện sau {timeout} giây.")
-            # Có thể thêm các hành động khác ở đây, ví dụ: thoát chương trình
-            return False
-        print(f"Đang chờ thư mục disk '{directory_path}' được mount...")
-        time.sleep(1) # Chờ 1 giây rồi thử lại
-    
-    # Nếu thư mục đã tồn tại nhưng không phải là thư mục, tạo nó
-    if not os.path.isdir(directory_path):
-        try:
-            os.makedirs(directory_path, exist_ok=True)
-            print(f"Đã tạo thư mục '{directory_path}' vì nó chưa tồn tại.")
-        except OSError as e:
-            print(f"LỖI: Không thể tạo thư mục '{directory_path}'. Lỗi: {e}")
-            return False
-            
-    print(f"Thành công: Thư mục disk '{directory_path}' đã sẵn sàng.")
-    return True
-
-# --- Chạy hàm chờ ngay khi ứng dụng khởi động ---
-if not wait_for_disk_mount(DATA_DIRECTORY_ON_SERVER):
-    # Nếu sau một thời gian chờ mà thư mục vẫn không có, có thể dừng ứng dụng
-    # để Render tự khởi động lại.
-    sys.exit("Không thể khởi động: Thư mục disk không sẵn sàng.")
+# --- Tạo thư mục nếu nó chưa tồn tại khi server khởi động ---
+try:
+    if not os.path.exists(DATA_DIRECTORY_ON_SERVER):
+        os.makedirs(DATA_DIRECTORY_ON_SERVER)
+    print(f"Thư mục dữ liệu tạm thời đã sẵn sàng tại: {DATA_DIRECTORY_ON_SERVER}")
+except OSError as e:
+    print(f"LỖI NGHIÊM TRỌNG: Không thể tạo thư mục dữ liệu tạm thời. Lỗi: {e}")
+    sys.exit("Không thể khởi động: Không tạo được thư mục dữ liệu.")
 
 # --- Import các file logic xử lý ---
 # ... (Phần import giữ nguyên như cũ) ...
@@ -75,6 +50,12 @@ def upload_files():
 
     if file and file.filename.endswith('.zip'):
         try:
+            # Xóa các thư mục cũ trước khi tạo thư mục mới để tiết kiệm dung lượng
+            for item in os.listdir(DATA_DIRECTORY_ON_SERVER):
+                item_path = os.path.join(DATA_DIRECTORY_ON_SERVER, item)
+                if os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
+
             batch_id = str(uuid.uuid4())[:13]
             batch_dir = os.path.join(DATA_DIRECTORY_ON_SERVER, batch_id)
             os.makedirs(batch_dir, exist_ok=True)
@@ -128,7 +109,7 @@ def run_tool():
         
     target_directory = os.path.join(DATA_DIRECTORY_ON_SERVER, batch_id)
     if not os.path.isdir(target_directory):
-        return jsonify({'error': f'Không tìm thấy dữ liệu cho Batch ID "{batch_id}". Vui lòng kiểm tra lại.'}), 404
+        return jsonify({'error': f'Không tìm thấy dữ liệu cho Batch ID "{batch_id}". Dữ liệu có thể đã bị xóa do server khởi động lại. Vui lòng tải lại file.'}), 404
 
     result_message = ""
     try:
