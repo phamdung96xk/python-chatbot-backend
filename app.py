@@ -2,7 +2,7 @@
 import os, io, zipfile, tempfile, time, uuid, re, glob, importlib, inspect, threading, fnmatch
 import requests
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, make_response, send_file
+from flask import Flask, request, jsonify, make_response, send_file, redirect
 from flask_cors import CORS
 
 # boto3 là tùy chọn (S3 presign)
@@ -11,14 +11,15 @@ try:
 except Exception:
     boto3 = None
 
-app = Flask(__name__)
+# ===== Flask app: serve static ./static (chatbot.html) =====
+app = Flask(__name__, static_folder="static", static_url_path="/static")
 
 # ===== Config =====
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500MB
 UPLOAD_DIR = "/tmp/uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# ===== CORS =====
+# ===== CORS (giữ nguyên; same-origin vẫn OK) =====
 CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=False)
 
 # ===== (Optional) S3 presign =====
@@ -79,7 +80,6 @@ def analyze_zip_file(zip_path: str) -> dict:
 
 # ===== Download & normalize helpers =====
 def _normalize_gdrive(url: str) -> str:
-    """Mọi dạng link Drive -> direct download."""
     m = re.search(r"/file/d/([^/]+)", url)
     if m:
         return f"https://drive.google.com/uc?export=download&id={m.group(1)}"
@@ -89,17 +89,12 @@ def _normalize_gdrive(url: str) -> str:
     return url
 
 def _download_zip_to_file(url: str, dest_path: str):
-    """
-    Tải ZIP (Drive/URL thường) xuống file trực tiếp (streaming), tiết kiệm RAM.
-    Xác thực cuối: dest_path phải là ZIP hợp lệ.
-    """
     is_drive = "drive.google.com" in url
     if is_drive:
         url = _normalize_gdrive(url)
 
     with requests.Session() as s:
         r = s.get(url, stream=True, allow_redirects=True, timeout=(30, 300))
-        # confirm page của Drive (file lớn/virus scan)
         if is_drive and "text/html" in r.headers.get("Content-Type", "").lower():
             try:
                 text = r.text
@@ -110,13 +105,11 @@ def _download_zip_to_file(url: str, dest_path: str):
                         r = s.get(confirm_url, stream=True, allow_redirects=True, timeout=(30, 300))
             except Exception:
                 pass
-
         r.raise_for_status()
         with open(dest_path, "wb") as f:
             for chunk in r.iter_content(1024 * 64):
                 if chunk:
                     f.write(chunk)
-
     if not zipfile.is_zipfile(dest_path):
         raise ValueError("Nội dung tải về không phải file ZIP.")
 
@@ -152,13 +145,6 @@ def _first_data_dir_recursive(root_dir: str):
     return None
 
 def _canonical_data_dir(root_dir: str) -> str:
-    """
-    1) Nếu root_dir có *.xml hoặc *_content.txt -> dùng root_dir
-    2) Nếu có thư mục 'Test/' và trong đó có dữ liệu -> dùng Test/
-    3) Nếu root_dir chỉ có 1 thư mục con -> chui vào rồi kiểm tra lại
-    4) Quét đệ quy: lấy thư mục đầu tiên có dữ liệu
-    5) Không tìm thấy -> trả về root_dir (để module báo lỗi rõ ràng)
-    """
     root_dir = os.path.abspath(root_dir)
     if os.path.isdir(root_dir) and _has_data(root_dir):
         return root_dir
@@ -177,7 +163,7 @@ def _canonical_data_dir(root_dir: str) -> str:
         return found
     return root_dir
 
-# ===== Drive visibility probe (tham khảo) =====
+# ===== Drive visibility probe =====
 def _probe_drive_visibility(url: str):
     norm = _normalize_gdrive(url)
     try:
@@ -187,12 +173,10 @@ def _probe_drive_visibility(url: str):
             status = r.status_code
             ctype = (r.headers.get("Content-Type") or "").lower()
             cdisp = (r.headers.get("Content-Disposition") or "").lower()
-
             if status in (401, 403):
                 return {"public": False, "reason": f"HTTP {status} (cần quyền)", "normalized_url": norm}
             if status == 404:
                 return {"public": False, "reason": "HTTP 404 (không tồn tại/không truy cập được)", "normalized_url": norm}
-
             if "text/html" in ctype:
                 try:
                     snippet = r.raw.read(512, decode_content=True) or b""
@@ -202,10 +186,8 @@ def _probe_drive_visibility(url: str):
                         return {"public": False, "reason": "Drive báo cần đăng nhập/đòi quyền", "normalized_url": norm}
                 except Exception:
                     pass
-
             if "attachment" in cdisp:
                 return {"public": True, "reason": "Có header tải xuống", "normalized_url": norm}
-
             try:
                 r2 = s.get(norm, headers={"Range": "bytes=0-8"}, stream=True,
                            allow_redirects=True, timeout=(10, 20))
@@ -214,7 +196,6 @@ def _probe_drive_visibility(url: str):
                     return {"public": True, "reason": "Nhận diện chữ ký ZIP", "normalized_url": norm}
             except Exception:
                 pass
-
             return {"public": True, "reason": "Truy cập được", "normalized_url": norm}
     except Exception as e:
         return {"public": False, "reason": f"Lỗi probe: {type(e).__name__}: {e}", "normalized_url": norm}
@@ -300,18 +281,12 @@ HELP_TEXT = (
 )
 
 def _call_tool_module(module_name: str, command: str):
-    """Quy trình:
-       1) run/main/handle (có tham số hoặc không)
-       1.5) Có URL (url=... hoặc URL trần): tải ZIP (stream), giải nén
-           -> xác định thư mục dữ liệu hợp lệ và CHỈ gắn path=... nếu lệnh chưa có.
-       2) Fallback: run_*_check(directory_path)
-    """
     try:
         mod = importlib.import_module(module_name)
     except Exception as e:
         return {"ok": False, "error": f"Không import được module '{module_name}': {e}"}
 
-    # B1: run/main/handle
+    # 1) run/main/handle
     for fn_name in ("run", "main", "handle"):
         fn = getattr(mod, fn_name, None)
         if callable(fn):
@@ -323,7 +298,7 @@ def _call_tool_module(module_name: str, command: str):
                 return {"ok": False, "module": module_name, "fn": fn_name,
                         "error": f"Lỗi khi gọi {module_name}.{fn_name}: {type(e).__name__}: {e}"}
 
-    # B1.5: nhận URL -> tải & giải nén -> gắn path nếu chưa có
+    # 1.5) URL -> tải & giải nén -> gắn path nếu chưa có
     murl = re.search(r"url\s*=\s*([^\s]+)", command, flags=re.I)
     if not murl:
         murl = re.search(r"(https?://\S+)", command, flags=re.I)
@@ -341,7 +316,7 @@ def _call_tool_module(module_name: str, command: str):
         except Exception as e:
             return {"ok": False, "error": f"Tải/Giải nén từ URL lỗi: {type(e).__name__}: {e}"}
 
-    # B2: fallback run_*_check(dir)
+    # 2) run_*_check(dir)
     name_map = {
         "civitek_new_logic": "run_civitek_new_check",
         "civitek_logic":     "run_civitek_check",
@@ -357,18 +332,14 @@ def _call_tool_module(module_name: str, command: str):
             m = re.search(r"path\s*=\s*([^\s]+)", command, flags=re.I)
             raw_dir = m.group(1) if m else UPLOAD_DIR
             data_dir = _canonical_data_dir(raw_dir)
-
-            # Nếu sau chuẩn hoá mà vẫn không tồn tại, thử lùi về cha và chuẩn hoá lại
             if not os.path.isdir(data_dir):
                 parent = os.path.dirname(data_dir)
                 if os.path.isdir(parent):
                     data_dir = _canonical_data_dir(parent)
-
             if not os.path.isdir(data_dir):
                 return {"ok": False, "module": module_name, "fn": check_fn_name,
                         "error": (f"Thư mục dữ liệu không tồn tại: '{raw_dir}'. "
                                   f"Hãy bỏ 'path=' để backend tự chọn, hoặc chỉ định đúng thư mục đã giải nén.")}
-
             out = check_fn(data_dir)
             return {"ok": True, "module": module_name, "fn": check_fn_name,
                     "output": out, "data_dir": data_dir}
@@ -389,34 +360,29 @@ def route_command(command: str):
             return _call_tool_module(module_name, command)
     return {"ok": False, "error": "Không nhận dạng được tool từ lệnh. Gõ 'help' để xem hướng dẫn."}
 
-# ===== /api/run-tool — chạy ASYNC cho mọi lệnh =====
+# ===== /api/run-tool — chạy ASYNC =====
 @app.route("/api/run-tool", methods=["POST"])
 def run_tool():
     data = request.get_json(silent=True) or {}
     command = data.get("command", "").strip()
     if not command:
         return jsonify({"error": "Không có lệnh nào được cung cấp"}), 400
-
     job_id = uuid.uuid4().hex
     JOBS[job_id] = {"status": "queued", "updated": datetime.utcnow()}
     _gc_jobs()
-    t = threading.Thread(target=_run_command_background, args=(job_id, command), daemon=True)
-    t.start()
+    threading.Thread(target=_run_command_background, args=(job_id, command), daemon=True).start()
     return jsonify({"job_id": job_id, "status": "queued"}), 202
 
-# ===== /api/run-tool-async (alias) =====
 @app.route("/api/run-tool-async", methods=["POST"])
 def run_tool_async():
     data = request.get_json(silent=True) or {}
     command = data.get("command", "").strip()
     if not command:
         return jsonify({"error": "Không có lệnh nào được cung cấp"}), 400
-
     job_id = uuid.uuid4().hex
     JOBS[job_id] = {"status": "queued", "updated": datetime.utcnow()}
     _gc_jobs()
-    t = threading.Thread(target=_run_command_background, args=(job_id, command), daemon=True)
-    t.start()
+    threading.Thread(target=_run_command_background, args=(job_id, command), daemon=True).start()
     return jsonify({"job_id": job_id, "status": "queued"}), 202
 
 # ===== /api/job/<id> =====
@@ -461,7 +427,7 @@ def analyze_object():
     result = analyze_zip_stream(buf.read())
     return jsonify({"ok": True, "key": key, "result": result})
 
-# ====== Smart delete error lines (no re-upload) ======
+# ====== Smart delete error lines ======
 ID_PAT = re.compile(r"\bID\s*:\s*([A-Za-z0-9._\-]+)", re.I)
 
 def _extract_error_ids_from_log(log_text: str):
@@ -473,24 +439,16 @@ def _extract_error_ids_from_log(log_text: str):
     return sorted(ids)
 
 def _delete_lines_with_ids_in_file(file_path: str, ids: set[str]) -> dict:
-    removed = 0
-    kept = 0
+    removed, kept = 0, 0
     try:
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
         new_lines = []
         for ln in lines:
             ln_low = ln.lower()
-            hit = False
-            for _id in ids:
-                if ln.startswith(_id + "|") or _id.lower() in ln_low:
-                    hit = True
-                    break
-            if hit:
-                removed += 1
-            else:
-                new_lines.append(ln)
-                kept += 1
+            hit = any(ln.startswith(i + "|") or i.lower() in ln_low for i in ids)
+            if hit: removed += 1
+            else:   kept += 1; new_lines.append(ln)
         if removed > 0:
             with open(file_path, "w", encoding="utf-8") as f:
                 f.writelines(new_lines)
@@ -500,14 +458,6 @@ def _delete_lines_with_ids_in_file(file_path: str, ids: set[str]) -> dict:
 
 @app.route("/api/delete-error-lines", methods=["POST"])
 def delete_error_lines():
-    """
-    Body JSON:
-      {
-        "data_dir": "/tmp/uploads/gd_xxx",    # bắt buộc
-        "log_text": "<kết quả từ job>",       # bắt buộc, để trích ID
-        "dry_run": false                      # tùy chọn
-      }
-    """
     data = request.get_json(silent=True) or {}
     data_dir = data.get("data_dir")
     log_text = data.get("log_text") or ""
@@ -523,10 +473,8 @@ def delete_error_lines():
     targets = []
     for root, dirs, files in os.walk(data_dir):
         for name in files:
-            for pat in patterns:
-                if fnmatch.fnmatch(name, pat):
-                    targets.append(os.path.join(root, name))
-                    break
+            if any(fnmatch.fnmatch(name, pat) for pat in patterns):
+                targets.append(os.path.join(root, name))
 
     if not targets:
         return jsonify({"ok": False, "error": "Không tìm thấy file *_content.txt trong thư mục dữ liệu."}), 400
@@ -535,13 +483,10 @@ def delete_error_lines():
         return jsonify({"ok": True, "dry_run": True, "ids": ids, "targets": [os.path.basename(p) for p in targets]})
 
     ids_set = set(ids)
-    reports = []
-    total_removed = 0
-    modified_files = []
-
+    reports, total_removed, modified_files = [], 0, []
     for p in targets:
         rep = _delete_lines_with_ids_in_file(p, ids_set)
-        if isinstance(rep, dict) and rep.get("removed"):
+        if rep.get("removed"):
             total_removed += rep["removed"]
             modified_files.append(os.path.basename(p))
         reports.append(rep)
@@ -557,11 +502,6 @@ def delete_error_lines():
 # ===== Download cleaned files =====
 @app.route("/api/download-cleaned-one", methods=["GET"])
 def download_cleaned_one():
-    """
-    GET params:
-      - data_dir: thư mục dữ liệu
-      - name: tên file _content.txt cần tải (giữ nguyên tên)
-    """
     data_dir = request.args.get("data_dir", "").strip()
     name = request.args.get("name", "").strip()
     if not data_dir or not os.path.isdir(data_dir):
@@ -586,13 +526,6 @@ def download_cleaned_one():
 
 @app.route("/api/download-cleaned", methods=["GET"])
 def download_cleaned_zip():
-    """
-    Tải nhiều file `_content.txt` trong 1 ZIP.
-    GET params:
-      - data_dir: bắt buộc
-      - names: danh sách tên file, ngăn cách bằng dấu phẩy (tùy chọn).
-               Nếu bỏ trống -> gom tất cả *_content.txt
-    """
     data_dir = request.args.get("data_dir", "").strip()
     names_param = request.args.get("names", "").strip()
     if not data_dir or not os.path.isdir(data_dir):
@@ -615,12 +548,21 @@ def download_cleaned_zip():
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
         for p in targets:
-            arcname = os.path.basename(p)  # giữ nguyên tên bên trong ZIP
+            arcname = os.path.basename(p)
             z.write(p, arcname=arcname)
     mem.seek(0)
     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     zip_name = f"cleaned_{ts}.zip"
     return send_file(mem, as_attachment=True, download_name=zip_name, mimetype="application/zip")
+
+# ======= Serve chatbot.html (same-origin) =======
+@app.get("/chatbot.html")
+def chatbot_page():
+    return app.send_static_file("chatbot.html")
+
+@app.get("/")
+def index():
+    return redirect("/chatbot.html")
 
 # ===== Local dev =====
 if __name__ == "__main__":
