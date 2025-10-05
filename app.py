@@ -33,10 +33,10 @@ except ImportError as e:
 # --- Khởi tạo Flask App ---
 app = Flask(__name__)
 
-# --- CẬP NHẬT QUAN TRỌNG: Cấu hình CORS đơn giản nhất (cho phép tất cả) ---
-# Dòng này sẽ cho phép yêu cầu từ mọi tên miền.
-CORS(app)
-
+# --- CẬP NHẬT CUỐI CÙNG: Cấu hình CORS chỉ định chính xác Origin ---
+# Dòng này sẽ cho phép các yêu cầu (bao gồm cả OPTIONS) từ trang GitHub Pages của bạn
+# đến tất cả các route bắt đầu bằng /api/
+CORS(app, resources={r"/api/*": {"origins": "https://phamdung96xk.github.io"}})
 
 @app.route('/api/upload-files', methods=['POST'])
 def upload_files():
@@ -49,6 +49,7 @@ def upload_files():
 
     if file and file.filename.endswith('.zip'):
         try:
+            # Xóa các thư mục cũ trước khi tạo thư mục mới để tiết kiệm dung lượng
             for item in os.listdir(DATA_DIRECTORY_ON_SERVER):
                 item_path = os.path.join(DATA_DIRECTORY_ON_SERVER, item)
                 if os.path.isdir(item_path):
