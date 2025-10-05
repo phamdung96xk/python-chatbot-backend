@@ -1,4 +1,4 @@
-# app.py
+# app.py (full)
 import os, io, zipfile, tempfile, time, uuid, re, glob, importlib, inspect, threading, fnmatch, shutil
 import requests
 from datetime import datetime, timedelta
@@ -6,7 +6,7 @@ from flask import Flask, request, jsonify, make_response, send_file, redirect
 from flask_cors import CORS
 from concurrent.futures import ProcessPoolExecutor, TimeoutError
 
-# boto3 (optional, cho S3)
+# boto3 (optional, cho S3 nếu dùng)
 try:
     import boto3  # type: ignore
 except Exception:
@@ -14,17 +14,106 @@ except Exception:
 
 # ================= Flask app & config =================
 app = Flask(__name__, static_folder="static", static_url_path="/static")
-app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500MB
+# Giới hạn kích thước request: 500MB
+app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024
+
 UPLOAD_DIR = "/tmp/uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# CORS (same-origin vẫn OK; để nguyên cho linh hoạt)
+# CORS mở cho /api/* (same-origin vẫn OK)
 CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=False)
 
 # S3 (optional)
 S3_BUCKET = os.environ.get("S3_BUCKET")
 AWS_REGION = os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-1")
 s3 = boto3.client("s3", region_name=AWS_REGION) if (boto3 and S3_BUCKET) else None
+
+# ================== Disk & janitor helpers ==================
+def dir_size_bytes(path: str) -> int:
+    total = 0
+    for root, _, files in os.walk(path, onerror=lambda e: None):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except Exception:
+                pass
+    return total
+
+def human(n):
+    for u in ["B","KB","MB","GB","TB"]:
+        if n < 1024: return f"{n:.1f}{u}"
+        n /= 1024
+    return f"{n:.1f}PB"
+
+def ensure_free_space(min_free_bytes: int, base_dir: str = "/tmp"):
+    """Raise RuntimeError nếu dung lượng trống < ngưỡng."""
+    usage = shutil.disk_usage(base_dir)
+    if usage.free < min_free_bytes:
+        raise RuntimeError(
+            f"Hệ thống sắp đầy đĩa: còn {human(usage.free)} trống (< {human(min_free_bytes)})."
+        )
+
+def cleanup_uploads(max_age_hours: int = 12,
+                    max_total_bytes: int = 3 * 1024**3,   # ~3GB
+                    base_dir: str = UPLOAD_DIR):
+    """
+    Xóa thư mục/file tạm quá tuổi hoặc khi tổng dung lượng vượt ngưỡng.
+    1) Xóa theo tuổi
+    2) Nếu vẫn > ngưỡng: xóa LRU (cũ trước) cho tới khi đủ.
+    """
+    try:
+        if not os.path.isdir(base_dir): return
+        now = time.time()
+        items = []
+        total = 0
+        for name in os.listdir(base_dir):
+            p = os.path.join(base_dir, name)
+            try:
+                st = os.stat(p)
+                size = dir_size_bytes(p) if os.path.isdir(p) else os.path.getsize(p)
+                total += size
+                items.append((p, st.st_mtime, size))
+            except Exception:
+                pass
+
+        # 1) Xóa theo tuổi
+        cutoff = now - max_age_hours * 3600
+        for p, mtime, _ in items:
+            if mtime < cutoff:
+                shutil.rmtree(p, ignore_errors=True)
+
+        # Quét lại
+        items2, total2 = [], 0
+        for name in os.listdir(base_dir):
+            p = os.path.join(base_dir, name)
+            try:
+                st = os.stat(p)
+                size = dir_size_bytes(p) if os.path.isdir(p) else os.path.getsize(p)
+                total2 += size
+                items2.append((p, st.st_mtime, size))
+            except Exception:
+                pass
+
+        # 2) Nếu vẫn > ngưỡng -> xóa LRU
+        if total2 > max_total_bytes:
+            items2.sort(key=lambda x: x[1])  # mtime tăng dần (cũ trước)
+            for p, _, sz in items2:
+                shutil.rmtree(p, ignore_errors=True)
+                total2 -= sz
+                if total2 <= max_total_bytes:
+                    break
+    except Exception:
+        # Không để lỗi dọn rác phá request
+        pass
+
+@app.before_request
+def _maybe_cleanup_tmp():
+    # 1% xác suất dọn rác cho mỗi request (nhẹ, không block)
+    if uuid.uuid4().int % 100 == 0:
+        cleanup_uploads(
+            max_age_hours=int(os.environ.get("TMP_MAX_AGE_H", "12")),
+            max_total_bytes=int(float(os.environ.get("TMP_MAX_TOTAL_GB", "3")) * 1024**3),
+        )
 
 # ================ Job store & ProcessPool ================
 JOBS = {}  # job_id -> {"status": "queued|running|done|error", "result": ..., "error": ..., "updated": datetime}
@@ -40,14 +129,11 @@ def _gc_jobs(hours: int = 6):
             del JOBS[k]
 
 def _run_command_background(job_id: str, command: str):
-    """
-    Chạy command trong tiến trình riêng (CPU-bound không chặn web worker).
-    """
+    """Chạy command trong tiến trình riêng (CPU-bound không chặn web worker)."""
     try:
         JOBS[job_id] = {"status": "running", "updated": datetime.utcnow()}
         fut = EXEC.submit(route_command, command)  # chạy ở process khác
         res = fut.result(timeout=JOB_TIMEOUT)
-        # Chuẩn hoá output cho frontend
         if res.get("ok"):
             if res.get("help"):
                 out = {"result": res.get("message"), "help": True}
@@ -101,7 +187,9 @@ def _download_zip_to_file(url: str, dest_path: str):
     - Tải ZIP 1MB/chunk (nhanh hơn).
     - Bỏ qua HTML confirm của Google Drive nếu có.
     - Xác thực nội dung cuối cùng là ZIP.
+    - Kiểm tra dung lượng trống trước khi ghi.
     """
+    ensure_free_space(min_free_bytes=500 * 1024 * 1024, base_dir=os.path.dirname(dest_path))
     is_drive = "drive.google.com" in url
     if is_drive:
         url = _normalize_gdrive(url)
@@ -109,7 +197,6 @@ def _download_zip_to_file(url: str, dest_path: str):
     with requests.Session() as s:
         r = s.get(url, stream=True, allow_redirects=True, timeout=(30, 300))
         if is_drive and "text/html" in (r.headers.get("Content-Type", "")).lower():
-            # xử lý confirm token
             try:
                 text = r.text
                 if "confirm=" in text and "uc?export=download" in text:
@@ -132,14 +219,13 @@ def _download_zip_to_file(url: str, dest_path: str):
 # ========= Chỉ extract file cần (XML & *_content.txt) =========
 def extract_needed(zippath: str, outdir: str):
     """
-    Chỉ giải nén *.xml và *_content.txt để giảm I/O và tốc độ nhanh hơn.
+    Chỉ giải nén *.xml và *_content.txt để giảm I/O và tăng tốc.
     """
     os.makedirs(outdir, exist_ok=True)
     with zipfile.ZipFile(zippath, "r") as z:
         for info in z.infolist():
             name = info.filename
             low = name.lower()
-            # chỉ lấy .xml và *_content.txt
             if low.endswith(".xml") or low.endswith("_content.txt"):
                 z.extract(info, path=outdir)
 
@@ -247,14 +333,20 @@ def api_options(any_path):
 def upload_files():
     if request.method == "OPTIONS":
         return ("", 204)
-    if "file" not in request.files:
-        return jsonify({"error": "Thiếu field 'file' trong form-data"}), 400
-    f = request.files["file"]
-    if f.filename == "":
-        return jsonify({"error": "Tên file rỗng"}), 400
-    save_path = os.path.join(UPLOAD_DIR, f.filename)
-    f.save(save_path)
-    return jsonify({"status": "ok", "filename": f.filename, "saved_to": save_path})
+    try:
+        if "file" not in request.files:
+            return jsonify({"error": "Thiếu field 'file' trong form-data"}), 400
+        f = request.files["file"]
+        if f.filename == "":
+            return jsonify({"error": "Tên file rỗng"}), 400
+        ensure_free_space(min_free_bytes=500 * 1024 * 1024, base_dir=UPLOAD_DIR)
+        save_path = os.path.join(UPLOAD_DIR, f.filename)
+        f.save(save_path)
+        return jsonify({"status": "ok", "filename": f.filename, "saved_to": save_path})
+    except OSError as e:
+        if getattr(e, "errno", None) == 28:  # ENOSPC
+            return jsonify({"ok": False, "error": "Server hết dung lượng tạm, vui lòng thử lại sau."}), 507
+        raise
 
 # ======= Trích xuất ZIP đã upload -> chỉ extract file cần -> trả data_dir =======
 @app.route("/api/extract-uploaded", methods=["POST"])
@@ -281,18 +373,27 @@ def extract_uploaded():
         return jsonify({"ok": False, "error": "File không phải ZIP hợp lệ"}), 400
 
     try:
+        ensure_free_space(min_free_bytes=500 * 1024 * 1024, base_dir="/tmp")
         extract_dir = tempfile.mkdtemp(prefix="ul_", dir=UPLOAD_DIR)
         extract_needed(saved_to, extract_dir)
+
+        # XÓA file ZIP gốc ngay khi đã extract
+        try:
+            os.remove(saved_to)
+        except Exception:
+            pass
+
         best_dir = _canonical_data_dir(extract_dir)
 
-        # tóm tắt nội dung sau extract (chỉ các file cần)
-        found_xml = []
-        found_txt = []
+        # tóm tắt
+        found_xml, found_txt = [], []
         for root, dirs, files in os.walk(extract_dir):
             for n in files:
                 nl = n.lower()
-                if nl.endswith(".xml"): found_xml.append(os.path.relpath(os.path.join(root, n), extract_dir))
-                if nl.endswith("_content.txt"): found_txt.append(os.path.relpath(os.path.join(root, n), extract_dir))
+                if nl.endswith(".xml"):
+                    found_xml.append(os.path.relpath(os.path.join(root, n), extract_dir))
+                if nl.endswith("_content.txt"):
+                    found_txt.append(os.path.relpath(os.path.join(root, n), extract_dir))
 
         return jsonify({
             "ok": True,
@@ -306,6 +407,10 @@ def extract_uploaded():
                 "txt_sample": found_txt[:10],
             }
         })
+    except OSError as e:
+        if getattr(e, "errno", None) == 28:
+            return jsonify({"ok": False, "error": "Server hết dung lượng tạm khi giải nén. Thử xóa bớt hoặc đợi janitor dọn."}), 507
+        raise
     except Exception as e:
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
 
@@ -332,6 +437,11 @@ def analyze_by_url():
         _download_zip_to_file(url, tmp)
         with open(tmp, "rb") as f:
             result = analyze_zip_stream(f.read())
+        # Xóa file tạm
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
 
         return jsonify({
             "ok": True,
@@ -339,6 +449,10 @@ def analyze_by_url():
             "visibility": visibility or {"public": True, "reason": "URL thường"},
             "result": result
         })
+    except OSError as e:
+        if getattr(e, "errno", None) == 28:
+            return jsonify({"ok": False, "error": "Server hết dung lượng tạm khi tải URL."}), 507
+        raise
     except Exception as e:
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
 
@@ -367,7 +481,7 @@ def _call_tool_module(module_name: str, command: str):
     """
     Gọi module tool theo 3 bước:
     1) Nếu module có run/main/handle thì gọi thẳng.
-    2) Nếu lệnh có URL: tải ZIP, chỉ giải nén file cần, tự gán path= dir tốt nhất.
+    2) Nếu lệnh có URL: tải ZIP, chỉ extract file cần, tự gán path= dir tốt nhất.
     3) Nếu module có run_*_check(dir) thì gọi với data_dir đã chuẩn hoá.
     """
     try:
@@ -398,12 +512,20 @@ def _call_tool_module(module_name: str, command: str):
             _download_zip_to_file(url_in, tmp_zip)
 
             extract_dir = tempfile.mkdtemp(prefix="gd_", dir=UPLOAD_DIR)
-            # CHỈ giải nén file cần (nhanh & ít I/O)
+            ensure_free_space(min_free_bytes=500 * 1024 * 1024, base_dir="/tmp")
             extract_needed(tmp_zip, extract_dir)
+
+            # Xóa zip tải về ngay
+            try: os.remove(tmp_zip)
+            except Exception: pass
 
             best_dir = _canonical_data_dir(extract_dir)
             if not re.search(r"\bpath\s*=", command, flags=re.I):
                 command = f"{command} path={best_dir}"
+        except OSError as e:
+            if getattr(e, "errno", None) == 28:
+                return {"ok": False, "error": "Server hết dung lượng tạm khi tải/giải nén URL."}
+            return {"ok": False, "error": f"Tải/Giải nén từ URL lỗi: {type(e).__name__}: {e}"}
         except Exception as e:
             return {"ok": False, "error": f"Tải/Giải nén từ URL lỗi: {type(e).__name__}: {e}"}
 
