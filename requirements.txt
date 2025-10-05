@@ -1,0 +1,7 @@
+Flask
+Flask-Cors
+gunicorn
+beautifulsoup4
+lxml
+openpyxl
+pandas
