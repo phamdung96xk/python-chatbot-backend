@@ -8,7 +8,6 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 # --- Cấu hình cho server (sử dụng bộ nhớ tạm) ---
-# Tạo một thư mục ngay tại thư mục gốc của ứng dụng
 DATA_DIRECTORY_ON_SERVER = os.path.join(os.getcwd(), "data_input")
 
 # --- Tạo thư mục nếu nó chưa tồn tại khi server khởi động ---
@@ -21,7 +20,6 @@ except OSError as e:
     sys.exit("Không thể khởi động: Không tạo được thư mục dữ liệu.")
 
 # --- Import các file logic xử lý ---
-# ... (Phần import giữ nguyên như cũ) ...
 try:
     import civitek_logic
     import flager_logic
@@ -34,11 +32,11 @@ except ImportError as e:
 
 # --- Khởi tạo Flask App ---
 app = Flask(__name__)
-CORS(app)
 
-# --- Các endpoint (/api/upload-files và /api/run-tool) ---
-# --- GIỮ NGUYÊN TOÀN BỘ PHẦN CODE CỦA CÁC ENDPOINT NÀY ---
-# --- KHÔNG CÓ THAY ĐỔI GÌ Ở ĐÂY ---
+# --- CẬP NHẬT QUAN TRỌNG: Cấu hình CORS rõ ràng hơn ---
+# Cho phép yêu cầu từ trang GitHub Pages của bạn
+CORS(app, origins=["https://phamdung96xk.github.io"])
+
 @app.route('/api/upload-files', methods=['POST'])
 def upload_files():
     if 'file' not in request.files:
@@ -50,7 +48,6 @@ def upload_files():
 
     if file and file.filename.endswith('.zip'):
         try:
-            # Xóa các thư mục cũ trước khi tạo thư mục mới để tiết kiệm dung lượng
             for item in os.listdir(DATA_DIRECTORY_ON_SERVER):
                 item_path = os.path.join(DATA_DIRECTORY_ON_SERVER, item)
                 if os.path.isdir(item_path):

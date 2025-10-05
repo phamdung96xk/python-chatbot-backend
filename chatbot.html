@@ -1,193 +1,242 @@
 <!DOCTYPE html>
 <html lang="vi">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Trang Web Chatbot Python</title>
+    <title>Bot Tích Hợp Python Tools</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        body { font-family: 'Inter', sans-serif; }
-        #chat-window { scroll-behavior: smooth; }
-        .chat-bubble {
-            opacity: 0;
-            transform: translateY(20px);
-            animation: popIn 0.3s ease forwards;
+        body {
+            font-family: 'Inter', sans-serif;
         }
-        @keyframes popIn {
-            to { opacity: 1; transform: translateY(0); }
+        #chatbox::-webkit-scrollbar {
+            width: 8px;
         }
-        .loader {
-            width: 12px; height: 12px; border-radius: 50%; display: block;
-            margin: 15px auto; position: relative; color: #888;
-            box-sizing: border-box; animation: animloader 1s linear infinite alternate;
+        #chatbox::-webkit-scrollbar-track {
+            background: #f1f1f1;
         }
-        @keyframes animloader {
-            0% { box-shadow: -38px -12px, -14px -12px, 14px -12px, 38px -12px; }
-            100% { box-shadow: -38px 12px, -14px 12px, 14px 12px, 38px 12px; }
+        #chatbox::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 4px;
         }
-        /* Custom styles for upload button */
-        #upload-btn:hover svg { transform: scale(1.1); }
+        #chatbox::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+        .spinner {
+            border: 3px solid rgba(0, 0, 0, 0.1);
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            border-left-color: #09f;
+            animation: spin 1s ease infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
     </style>
 </head>
-<body class="bg-gray-100 flex items-center justify-center h-screen">
-    <div class="w-full max-w-2xl h-full md:h-[90vh] flex flex-col bg-white shadow-2xl rounded-lg overflow-hidden">
-        <header class="bg-blue-600 text-white p-4 shadow-md z-10">
-            <h1 class="text-2xl font-bold text-center">Bot Tích Hợp Python Tools</h1>
-            <p class="text-sm text-center text-blue-200">1. Tải file ZIP | 2. Gõ lệnh kèm Batch ID (ví dụ: flager abc-123)</p>
+
+<body class="bg-gray-100 flex items-center justify-center min-h-screen">
+    <div class="w-full max-w-2xl mx-auto bg-white shadow-2xl rounded-lg flex flex-col h-[90vh]">
+        <header class="bg-blue-600 text-white p-4 rounded-t-lg shadow-md">
+            <h1 class="text-xl font-bold text-center">Bot Tích Hợp Python Tools</h1>
+            <p class="text-sm text-center text-blue-100 mt-1">1. Tải file ZIP | 2. Gõ lệnh kèm Batch ID (Ví dụ: flager abc-123)</p>
         </header>
-        
-        <main id="chat-window" class="flex-1 p-6 overflow-y-auto bg-gray-50">
-            <div class="chat-bubble flex justify-start mb-4">
-                <div class="bg-blue-500 text-white rounded-lg py-2 px-4 max-w-md">
-                    <p>Xin chào! Vui lòng nén các file XML và TXT vào một file .zip rồi nhấn nút kẹp ghim 📎 để tải lên.</p>
-                </div>
-            </div>
+
+        <main id="chatbox" class="flex-1 p-4 overflow-y-auto bg-gray-50">
+            <!-- Chat messages will be appended here -->
         </main>
 
-        <div id="typing-indicator" class="px-6 pb-2 hidden">
+        <footer class="p-4 border-t border-gray-200 bg-white rounded-b-lg">
             <div class="flex items-center space-x-2">
-                 <div class="bg-gray-200 rounded-lg py-2 px-4 max-w-sm">
-                    <span class="loader"></span>
-                 </div>
-            </div>
-        </div>
-
-        <footer class="p-4 bg-white border-t">
-            <div class="flex items-center bg-gray-100 rounded-lg p-2">
-                <button id="upload-btn" title="Tải lên file .zip" class="text-gray-500 hover:text-blue-600 p-2 rounded-full transition duration-300">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-paperclip transition-transform duration-300"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>
+                <!-- Nút upload file -->
+                <label for="file-upload" id="file-upload-label" class="cursor-pointer">
+                    <svg class="w-8 h-8 text-gray-500 hover:text-blue-600 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"></path></svg>
+                </label>
+                <input id="file-upload" type="file" class="hidden" accept=".zip">
+                <button id="file-upload-btn" class="px-4 py-2 bg-green-500 text-white font-semibold rounded-lg hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-400 disabled:bg-gray-400 transition-all">
+                    Tải lên
                 </button>
-                <input type="file" id="file-input" accept=".zip" class="hidden">
-                <input type="text" id="user-input" placeholder="Nhập lệnh và Batch ID..." class="flex-1 bg-transparent border-none focus:ring-0 px-2 text-gray-700">
-                <button id="send-btn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition duration-300">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-send"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                
+                <!-- Ô nhập lệnh -->
+                <input type="text" id="user-input" class="flex-1 border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Nhập lệnh và Batch ID...">
+                
+                <!-- Nút gửi -->
+                <button id="send-btn" class="bg-blue-600 text-white p-2 rounded-full hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-400">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"></path></svg>
                 </button>
             </div>
+             <p id="file-name-display" class="text-xs text-gray-500 mt-2 ml-2 truncate"></p>
         </footer>
     </div>
 
     <script>
-        // DOM Elements
-        const chatWindow = document.getElementById('chat-window');
+        // --- CẤU HÌNH QUAN TRỌNG ---
+        // Thay thế URL này bằng URL của Web Service trên Render của bạn
+        const BACKEND_URL = "https://python-chatbot-backend-w2yq.onrender.com"; 
+
+        const chatbox = document.getElementById('chatbox');
         const userInput = document.getElementById('user-input');
         const sendBtn = document.getElementById('send-btn');
-        const typingIndicator = document.getElementById('typing-indicator');
-        const uploadBtn = document.getElementById('upload-btn');
-        const fileInput = document.getElementById('file-input');
+        const fileUploadInput = document.getElementById('file-upload');
+        const fileUploadBtn = document.getElementById('file-upload-btn');
+        const fileNameDisplay = document.getElementById('file-name-display');
 
-        // =================================================================
-        // ==== QUAN TRỌNG: THAY URL CỦA BẠN VÀO ĐÂY ====
-        const BACKEND_URL = "https://python-chatbot-backend-0y5v.onrender.com"; 
-        // =================================================================
-
-        const RUN_TOOL_ENDPOINT = `${BACKEND_URL}/api/run-tool`;
-        const UPLOAD_ENDPOINT = `${BACKEND_URL}/api/upload-files`;
-
-        // Function to add a message to the chat window
-        function addMessage(message, sender, isHtml = false) {
+        function addMessage(text, sender, isHTML = false) {
             const messageDiv = document.createElement('div');
-            messageDiv.classList.add('chat-bubble', 'flex', 'mb-4');
+            messageDiv.className = `flex mb-4 ${sender === 'user' ? 'justify-end' : 'justify-start'}`;
 
-            const contentDiv = document.createElement('div');
-            contentDiv.classList.add('rounded-lg', 'py-2', 'px-4', 'max-w-md');
+            const messageBubble = document.createElement('div');
+            messageBubble.className = `rounded-lg px-4 py-2 max-w-xs md:max-w-md break-words shadow ${sender === 'user' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-800'}`;
             
-            contentDiv.style.whiteSpace = "pre-wrap";
-            if (isHtml) {
-                contentDiv.innerHTML = message;
+            if (isHTML) {
+                messageBubble.innerHTML = text;
             } else {
-                contentDiv.textContent = message;
+                messageBubble.textContent = text;
             }
 
-            if (sender === 'user') {
-                messageDiv.classList.add('justify-end');
-                contentDiv.classList.add('bg-gray-200', 'text-gray-800');
-            } else {
-                messageDiv.classList.add('justify-start');
-                contentDiv.classList.add('bg-blue-500', 'text-white');
-            }
-
-            messageDiv.appendChild(contentDiv);
-            chatWindow.appendChild(messageDiv);
-            chatWindow.scrollTop = chatWindow.scrollHeight;
+            messageDiv.appendChild(messageBubble);
+            chatbox.appendChild(messageDiv);
+            chatbox.scrollTop = chatbox.scrollHeight;
         }
         
-        // Function to send a command to the backend
-        async function sendMessage() {
-            const userMessage = userInput.value.trim();
-            if (userMessage === '') return;
+        async function handleSendCommand() {
+            const command = userInput.value.trim();
+            if (!command) return;
 
-            addMessage(userMessage, 'user');
+            addMessage(command, 'user');
             userInput.value = '';
-            typingIndicator.classList.remove('hidden');
+            sendBtn.disabled = true;
+            
+            addMessage('<div class="spinner"></div>', 'bot', true);
 
             try {
-                const response = await fetch(RUN_TOOL_ENDPOINT, {
+                const response = await fetch(BACKEND_URL + '/api/run-tool', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ command: userMessage }),
+                    body: JSON.stringify({ command: command })
                 });
 
-                if (!response.ok) {
-                    const errorData = await response.json();
-                    throw new Error(errorData.error || `Lỗi từ server: ${response.statusText}`);
-                }
+                chatbox.removeChild(chatbox.lastChild);
 
                 const data = await response.json();
-                addMessage(data.result, 'bot');
+                const resultText = data.result || data.error || 'Lỗi không xác định từ server.';
+                
+                const formattedResult = `<pre class="whitespace-pre-wrap text-sm">${resultText}</pre>`;
+                addMessage(formattedResult, 'bot', true);
 
             } catch (error) {
-                console.error("Lỗi khi gọi API:", error);
-                addMessage(`Xin lỗi, đã có lỗi xảy ra: ${error.message}`, 'bot');
+                // --- CẬP NHẬT BÁO LỖI ---
+                chatbox.removeChild(chatbox.lastChild);
+                console.error("Fetch Error:", error);
+                addMessage('Lỗi kết nối đến server. Hãy nhấn F12, chọn tab "Console" để xem chi tiết lỗi và kiểm tra lại URL/trạng thái server.', 'bot');
             } finally {
-                typingIndicator.classList.add('hidden');
+                sendBtn.disabled = false;
             }
         }
 
-        // Function to handle file upload
-        async function handleFileUpload(event) {
-            const file = event.target.files[0];
-            if (!file) return;
+        function handleUploadFile() {
+            const file = fileUploadInput.files[0];
+            if (!file) {
+                addMessage('Bạn chưa chọn file nào để tải lên.', 'bot');
+                return;
+            }
+            if (!file.name.endsWith('.zip')) {
+                addMessage('Lỗi: Chỉ chấp nhận file có định dạng .zip', 'bot');
+                return;
+            }
 
-            addMessage(`Đang tải lên: ${file.name}...`, 'user');
-            typingIndicator.classList.remove('hidden');
+            const progressMessageId = `progress-${Date.now()}`;
+
+            const uploadingMessageHTML = `
+                <div class="font-semibold mb-1">Đang tải lên:</div>
+                <div class="text-sm truncate mb-2">${file.name}</div>
+                <div class="w-full bg-gray-300 rounded-full h-2.5">
+                    <div id="${progressMessageId}" class="bg-blue-600 h-2.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+                </div>
+                <div id="${progressMessageId}-text" class="text-right text-xs mt-1 text-gray-600">0%</div>
+            `;
+            addMessage(uploadingMessageHTML, 'user', true);
 
             const formData = new FormData();
             formData.append('file', file);
 
-            try {
-                const response = await fetch(UPLOAD_ENDPOINT, {
-                    method: 'POST',
-                    body: formData,
-                });
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', BACKEND_URL + '/api/upload-files', true);
 
-                const data = await response.json();
-
-                if (!response.ok) {
-                    throw new Error(data.error || 'Lỗi không xác định từ server.');
+            xhr.upload.onprogress = function(event) {
+                if (event.lengthComputable) {
+                    const percentComplete = Math.round((event.loaded / event.total) * 100);
+                    const progressBar = document.getElementById(progressMessageId);
+                    const progressText = document.getElementById(`${progressMessageId}-text`);
+                    if (progressBar) progressBar.style.width = percentComplete + '%';
+                    if (progressText) progressText.textContent = percentComplete + '%';
                 }
-                
-                const successMessage = `✅ Tải lên thành công! <br><b>Mã phiên (Batch ID): ${data.batch_id}</b> <br>Bây giờ bạn có thể chạy lệnh. Ví dụ: <b>flager ${data.batch_id}</b>`;
-                addMessage(successMessage, 'bot', true);
+            };
 
-            } catch (error) {
-                console.error('Lỗi tải file:', error);
-                addMessage(`Lỗi tải file: ${error.message}`, 'bot');
-            } finally {
-                typingIndicator.classList.add('hidden');
-                // Reset file input to allow uploading the same file again
-                fileInput.value = '';
-            }
+            xhr.onload = function() {
+                chatbox.removeChild(chatbox.lastChild);
+
+                if (xhr.status === 200) {
+                    const response = JSON.parse(xhr.responseText);
+                    addMessage(`Tải lên thành công: ${file.name}`, 'user');
+                    addMessage(`✅ ${response.message}\nBatch ID của bạn là: ${response.batch_id}`, 'bot');
+                } else {
+                    addMessage(`Tải lên thất bại: ${file.name}`, 'user');
+                    try {
+                        const errorResponse = JSON.parse(xhr.responseText);
+                        addMessage(`❌ Lỗi: ${errorResponse.error || xhr.statusText}`, 'bot');
+                    } catch (e) {
+                        addMessage(`❌ Lỗi tải lên không xác định. Status: ${xhr.status}`, 'bot');
+                    }
+                }
+                resetUploadUI();
+            };
+
+            // --- CẬP NHẬT BÁO LỖI ---
+            xhr.onerror = function(error) {
+                chatbox.removeChild(chatbox.lastChild);
+                console.error("Upload XHR Error:", error);
+                addMessage(`Tải lên thất bại: ${file.name}`, 'user');
+                addMessage('❌ Lỗi mạng hoặc server không phản hồi. Hãy nhấn F12, chọn tab "Console" để xem chi tiết (thường là lỗi CORS).', 'bot');
+                resetUploadUI();
+            };
+            
+            fileUploadBtn.disabled = true;
+            fileUploadBtn.textContent = 'Đang tải...';
+            
+            xhr.send(formData);
+        }
+        
+        function resetUploadUI() {
+            fileUploadBtn.disabled = false;
+            fileUploadBtn.textContent = 'Tải lên';
+            fileNameDisplay.textContent = '';
+            fileUploadInput.value = '';
         }
 
-        // Event Listeners
-        sendBtn.addEventListener('click', sendMessage);
-        userInput.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter') sendMessage();
+        sendBtn.addEventListener('click', handleSendCommand);
+        userInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                handleSendCommand();
+            }
         });
         
-        uploadBtn.addEventListener('click', () => fileInput.click());
-        fileInput.addEventListener('change', handleFileUpload);
+        fileUploadInput.addEventListener('change', () => {
+             if (fileUploadInput.files.length > 0) {
+                fileNameDisplay.textContent = `Đã chọn: ${fileUploadInput.files[0].name}`;
+            } else {
+                fileNameDisplay.textContent = '';
+            }
+        });
+
+        fileUploadBtn.addEventListener('click', handleUploadFile);
+
+        addMessage('Chào bạn, tôi là bot trợ lý. Hãy tải file ZIP chứa dữ liệu của bạn lên để bắt đầu.', 'bot');
+
     </script>
 </body>
 </html>
