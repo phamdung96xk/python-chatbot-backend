@@ -1,4 +1,4 @@
-# app.py (full)
+# app.py (full, TMP_MAX_TOTAL_GB mặc định 1.5GB, auto xóa >12h)
 import os, io, zipfile, tempfile, time, uuid, re, glob, importlib, inspect, threading, fnmatch, shutil
 import requests
 from datetime import datetime, timedelta
@@ -54,11 +54,11 @@ def ensure_free_space(min_free_bytes: int, base_dir: str = "/tmp"):
         )
 
 def cleanup_uploads(max_age_hours: int = 12,
-                    max_total_bytes: int = 3 * 1024**3,   # ~3GB
+                    max_total_bytes: int = int(1.5 * 1024**3),   # ~1.5 GB (mặc định mới)
                     base_dir: str = UPLOAD_DIR):
     """
     Xóa thư mục/file tạm quá tuổi hoặc khi tổng dung lượng vượt ngưỡng.
-    1) Xóa theo tuổi
+    1) Xóa theo tuổi (> max_age_hours)
     2) Nếu vẫn > ngưỡng: xóa LRU (cũ trước) cho tới khi đủ.
     """
     try:
@@ -112,7 +112,8 @@ def _maybe_cleanup_tmp():
     if uuid.uuid4().int % 100 == 0:
         cleanup_uploads(
             max_age_hours=int(os.environ.get("TMP_MAX_AGE_H", "12")),
-            max_total_bytes=int(float(os.environ.get("TMP_MAX_TOTAL_GB", "3")) * 1024**3),
+            # cho phép số thực, ví dụ "1.5"
+            max_total_bytes=int(float(os.environ.get("TMP_MAX_TOTAL_GB", "1.5")) * 1024**3),
         )
 
 # ================ Job store & ProcessPool ================
