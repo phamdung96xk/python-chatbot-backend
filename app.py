@@ -33,9 +33,11 @@ except ImportError as e:
 # --- Khởi tạo Flask App ---
 app = Flask(__name__)
 
-# --- CẬP NHẬT QUAN TRỌNG: Cấu hình CORS rõ ràng hơn ---
-# Cho phép yêu cầu từ trang GitHub Pages của bạn
-CORS(app, origins=["https://phamdung96xk.github.io"])
+# --- CẬP NHẬT QUAN TRỌNG: Cấu hình CORS rõ ràng và mạnh mẽ hơn ---
+# Áp dụng chính sách CORS cho tất cả các route bắt đầu bằng /api/
+# và chỉ cho phép yêu cầu từ trang GitHub Pages của bạn.
+CORS(app, resources={r"/api/*": {"origins": "https://phamdung96xk.github.io"}})
+
 
 @app.route('/api/upload-files', methods=['POST'])
 def upload_files():
