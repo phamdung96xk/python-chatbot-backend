@@ -1,8 +1,14 @@
 # app.py
-import os, io, zipfile, tempfile, time, uuid, re, glob, shutil, importlib, inspect
-import boto3, requests
+import os, io, zipfile, tempfile, time, uuid, re, glob, importlib, inspect
+import requests
 from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
+
+# boto3 là tùy chọn (chỉ tạo client nếu có S3_BUCKET)
+try:
+    import boto3  # type: ignore
+except Exception:
+    boto3 = None
 
 app = Flask(__name__)
 
@@ -17,7 +23,7 @@ CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=False)
 # ===== (Optional) S3 presign =====
 S3_BUCKET = os.environ.get("S3_BUCKET")
 AWS_REGION = os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-1")
-s3 = boto3.client("s3", region_name=AWS_REGION) if S3_BUCKET else None
+s3 = boto3.client("s3", region_name=AWS_REGION) if (boto3 and S3_BUCKET) else None
 
 # ===== ZIP helpers =====
 def analyze_zip_stream(body_bytes: bytes) -> dict:
@@ -41,39 +47,50 @@ def analyze_zip_file(zip_path: str) -> dict:
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
-# ===== Download helpers =====
+# ===== Download & normalize helpers =====
 def _normalize_gdrive(url: str) -> str:
     """Mọi dạng link Drive -> direct download."""
     m = re.search(r"/file/d/([^/]+)", url)
-    if m: return f"https://drive.google.com/uc?export=download&id={m.group(1)}"
+    if m:
+        return f"https://drive.google.com/uc?export=download&id={m.group(1)}"
     m = re.search(r"[?&]id=([^&]+)", url)
-    if m: return f"https://drive.google.com/uc?export=download&id={m.group(1)}"
+    if m:
+        return f"https://drive.google.com/uc?export=download&id={m.group(1)}"
     return url
 
-def _download_google_drive(url: str) -> bytes:
-    """Tải file public từ Google Drive, xử lý confirm, đảm bảo là ZIP."""
-    url = _normalize_gdrive(url)
-    with requests.Session() as s:
-        r = s.get(url, allow_redirects=True, timeout=60)
-        # Nếu cần confirm
-        if "confirm=" in r.text and "uc?export=download" in r.text:
-            m = re.search(r'href="(\/uc\?export=download[^"]+confirm=[^"]+)"', r.text)
-            if m:
-                confirm_url = "https://drive.google.com" + m.group(1).replace("&amp;", "&")
-                r = s.get(confirm_url, allow_redirects=True, timeout=60)
-        r.raise_for_status()
-        data = r.content
-        if not (data.startswith(b"PK\x03\x04") or data.startswith(b"PK\x05\x06") or data.startswith(b"PK\x07\x08")):
-            raise ValueError("Nội dung tải về không phải file ZIP (kiểm tra link/chia sẻ).")
-        return data
+def _download_zip_to_file(url: str, dest_path: str):
+    """
+    Tải ZIP (Drive/URL thường) xuống file trực tiếp (streaming), tránh tốn RAM.
+    Cuối cùng sẽ verify dest_path là ZIP hợp lệ, nếu không -> raise.
+    """
+    # Chuẩn hoá link Drive
+    is_drive = "drive.google.com" in url
+    if is_drive:
+        url = _normalize_gdrive(url)
 
-def _download_generic(url: str) -> bytes:
-    with requests.get(url, stream=True, timeout=60) as r:
+    with requests.Session() as s:
+        r = s.get(url, stream=True, allow_redirects=True, timeout=60)
+
+        # Nếu là trang confirm của Drive (file lớn/virus scan)
+        if is_drive and "text/html" in r.headers.get("Content-Type", "").lower():
+            try:
+                text = r.text
+                if "confirm=" in text and "uc?export=download" in text:
+                    m = re.search(r'href="(\/uc\?export=download[^"]+confirm=[^"]+)"', text)
+                    if m:
+                        confirm_url = "https://drive.google.com" + m.group(1).replace("&amp;", "&")
+                        r = s.get(confirm_url, stream=True, allow_redirects=True, timeout=60)
+            except Exception:
+                pass
+
         r.raise_for_status()
-        data = b"".join(chunk for chunk in r.iter_content(1024 * 64) if chunk)
-        if not (data.startswith(b"PK\x03\x04") or data.startswith(b"PK\x05\x06") or data.startswith(b"PK\x07\x08")):
-            raise ValueError("Nội dung tải về không phải file ZIP.")
-        return data
+        with open(dest_path, "wb") as f:
+            for chunk in r.iter_content(1024 * 64):
+                if chunk:
+                    f.write(chunk)
+
+    if not zipfile.is_zipfile(dest_path):
+        raise ValueError("Nội dung tải về không phải file ZIP.")
 
 # ===== Case-insensitive XML detection =====
 XML_PATTERNS = ["*.xml", "*.[xX][mM][lL]"]  # .xml, .XML, .Xml, ...
@@ -135,8 +152,10 @@ def analyze_by_url():
     if not url:
         return jsonify({"ok": False, "error": "Missing url"}), 400
     try:
-        body = _download_google_drive(url) if "drive.google.com" in url else _download_generic(url)
-        result = analyze_zip_stream(body)
+        tmp = os.path.join(UPLOAD_DIR, f"tmp_{uuid.uuid4().hex}.zip")
+        _download_zip_to_file(url, tmp)
+        with open(tmp, "rb") as f:
+            result = analyze_zip_stream(f.read())
         return jsonify({"ok": True, "source": url, "result": result})
     except Exception as e:
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
@@ -162,7 +181,7 @@ HELP_TEXT = (
 def _call_tool_module(module_name: str, command: str):
     """Quy trình:
        1) run/main/handle (có tham số hoặc không)
-       1.5) Có URL (url=... hoặc URL trần): tải ZIP, giải nén, gắn path=... (best dir)
+       1.5) Có URL (url=... hoặc URL trần): tải ZIP (stream), giải nén, gắn path=... (best dir)
        2) Fallback: run_*_check(directory_path)
     """
     try:
@@ -182,17 +201,15 @@ def _call_tool_module(module_name: str, command: str):
                 return {"ok": False, "module": module_name, "fn": fn_name,
                         "error": f"Lỗi khi gọi {module_name}.{fn_name}: {type(e).__name__}: {e}"}
 
-    # B1.5: nhận URL (url=... hoặc URL trần)
+    # B1.5: nhận URL (url=... hoặc URL trần) -> tải ZIP xuống file, extract, gắn path=...
     murl = re.search(r"url\s*=\s*([^\s]+)", command, flags=re.I)
     if not murl:
         murl = re.search(r"(https?://\S+)", command, flags=re.I)
     if murl:
         url_in = murl.group(1)
         try:
-            body = _download_google_drive(url_in) if "drive.google.com" in url_in else _download_generic(url_in)
             tmp_zip = os.path.join(UPLOAD_DIR, f"link_{uuid.uuid4().hex}.zip")
-            with open(tmp_zip, "wb") as f:
-                f.write(body)
+            _download_zip_to_file(url_in, tmp_zip)  # streaming to disk
             extract_dir = tempfile.mkdtemp(prefix="gd_", dir=UPLOAD_DIR)
             with zipfile.ZipFile(tmp_zip, "r") as z:
                 z.extractall(extract_dir)
