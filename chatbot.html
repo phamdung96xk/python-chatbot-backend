@@ -27,7 +27,7 @@
       <!-- Hàng nhập lệnh (Chat tới /api/run-tool) -->
       <div class="flex items-center gap-2">
         <input id="user-input" class="flex-1 border rounded-lg p-2 focus:outline-none focus:ring focus:border-blue-400"
-               placeholder="Nhập lệnh (ví dụ: 'thời tiết', 'phân tích')..." />
+               placeholder="Nhập lệnh (ví dụ: 'mi url=<link>', 'civitek <link>')..." />
         <button id="send-btn"
                 class="bg-blue-600 text-white px-3 py-2 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-400">
           Gửi
@@ -84,6 +84,7 @@
       wrap.appendChild(bubble);
       chatbox.appendChild(wrap);
       chatbox.scrollTop = chatbox.scrollHeight;
+      return bubble; // trả về để cập nhật sau (loading → kết quả)
     }
     function makeProgressBlock(id){
       return `
@@ -96,6 +97,41 @@
       `;
     }
 
+    // ======== Utils cho async run-tool ========
+    const delay = (ms)=>new Promise(r=>setTimeout(r, ms));
+
+    async function pollJob(jobId){
+      while(true){
+        const r = await fetch(`${BACKEND_URL}/api/job/${jobId}`);
+        if(!r.ok) throw new Error(`Poll lỗi: ${r.status}`);
+        const j = await r.json();
+        if(j.status === 'done') return j.result;   // {result, module, fn, data_dir}
+        if(j.status === 'error') throw new Error(j.error || 'Job failed');
+        await delay(2000); // đợi 2s rồi hỏi lại
+      }
+    }
+
+    async function runCommand(command){
+      const r = await fetch(`${BACKEND_URL}/api/run-tool`, {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ command }),
+        mode: 'cors'
+      });
+
+      // Server luôn trả 202 + job_id (bản backend mới). Nhưng vẫn hỗ trợ 200 cho backward compatibility.
+      if(r.status === 200){
+        return await r.json();
+      }
+      if(r.status === 202){
+        const j = await r.json();
+        if(!j.job_id) throw new Error('Không nhận được job_id');
+        return await pollJob(j.job_id);
+      }
+      const txt = await r.text().catch(()=> '');
+      throw new Error(`HTTP ${r.status}: ${txt}`);
+    }
+
     // ======== Chat (/api/run-tool) ========
     async function handleSendCommand(){
       const command = userInput.value.trim();
@@ -103,20 +139,15 @@
       addMessage(command, 'user');
       userInput.value=''; sendBtn.disabled=true;
 
-      addMessage('<div class="spinner"></div>', 'bot', true);
+      // tạo bubble loading để thay thế bằng kết quả khi xong
+      const loadingBubble = addMessage('<div class="flex items-center gap-2"><div class="spinner"></div><span>Đang xử lý, vui lòng đợi...</span></div>', 'bot', true);
+
       try{
-        const res = await fetch(BACKEND_URL + '/api/run-tool', {
-          method: 'POST',
-          headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ command }),
-          mode: 'cors'
-        });
-        const data = await res.json();
-        chatbox.removeChild(chatbox.lastChild);
-        addMessage(`<pre class="text-sm">${data.result || data.error || 'Lỗi không xác định từ server.'}</pre>`, 'bot', true);
+        const data = await runCommand(command);
+        const text = data?.result ?? JSON.stringify(data);
+        loadingBubble.innerHTML = `<pre class="text-sm">${text}</pre>`;
       }catch(e){
-        chatbox.removeChild(chatbox.lastChild);
-        addMessage('❌ Lỗi kết nối server. Kiểm tra BACKEND_URL / server.', 'bot');
+        loadingBubble.textContent = '❌ Lỗi kết nối/khởi chạy: ' + (e?.message || e);
       }finally{
         sendBtn.disabled=false;
       }
@@ -152,7 +183,6 @@
         if(xhr.status === 200){
           const resp = JSON.parse(xhr.responseText);
           addMessage(`Tải lên thành công: ${resp.filename}`, 'user');
-          // Nếu backend có phân tích ngay, sẽ có resp.result
           if(resp.result){
             addMessage(`<pre class="text-xs md:text-sm">${JSON.stringify(resp.result, null, 2)}</pre>`, 'bot', true);
           }else{

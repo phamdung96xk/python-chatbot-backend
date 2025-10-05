@@ -1,6 +1,7 @@
 # app.py
-import os, io, zipfile, tempfile, time, uuid, re, glob, importlib, inspect
+import os, io, zipfile, tempfile, time, uuid, re, glob, importlib, inspect, threading
 import requests
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
 
@@ -24,6 +25,35 @@ CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=False)
 S3_BUCKET = os.environ.get("S3_BUCKET")
 AWS_REGION = os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-1")
 s3 = boto3.client("s3", region_name=AWS_REGION) if (boto3 and S3_BUCKET) else None
+
+# ===== Async job store =====
+JOBS = {}  # job_id -> {"status": "queued|running|done|error", "result": ..., "error": ..., "updated": datetime}
+
+def _gc_jobs(hours: int = 6):
+    cutoff = datetime.utcnow() - timedelta(hours=hours)
+    for k, v in list(JOBS.items()):
+        if v.get("updated") and v["updated"] < cutoff:
+            del JOBS[k]
+
+def _run_command_background(job_id: str, command: str):
+    try:
+        JOBS[job_id] = {"status": "running", "updated": datetime.utcnow()}
+        res = route_command(command)
+        if res.get("ok"):
+            if res.get("help"):
+                out = {"result": res.get("message")}
+            else:
+                out = {
+                    "result": res.get("output"),
+                    "module": res.get("module"),
+                    "fn": res.get("fn"),
+                    "data_dir": res.get("data_dir"),
+                }
+            JOBS[job_id] = {"status": "done", "result": out, "updated": datetime.utcnow()}
+        else:
+            JOBS[job_id] = {"status": "error", "error": res.get("error"), "updated": datetime.utcnow()}
+    except Exception as e:
+        JOBS[job_id] = {"status": "error", "error": f"{type(e).__name__}: {e}", "updated": datetime.utcnow()}
 
 # ===== ZIP helpers =====
 def analyze_zip_stream(body_bytes: bytes) -> dict:
@@ -60,18 +90,16 @@ def _normalize_gdrive(url: str) -> str:
 
 def _download_zip_to_file(url: str, dest_path: str):
     """
-    Tải ZIP (Drive/URL thường) xuống file trực tiếp (streaming), tránh tốn RAM.
-    Cuối cùng sẽ verify dest_path là ZIP hợp lệ, nếu không -> raise.
+    Tải ZIP (Drive/URL thường) xuống file trực tiếp (streaming), tiết kiệm RAM.
+    Cuối cùng verify dest_path là ZIP hợp lệ, nếu không -> raise.
     """
-    # Chuẩn hoá link Drive
     is_drive = "drive.google.com" in url
     if is_drive:
         url = _normalize_gdrive(url)
 
     with requests.Session() as s:
-        r = s.get(url, stream=True, allow_redirects=True, timeout=60)
-
-        # Nếu là trang confirm của Drive (file lớn/virus scan)
+        r = s.get(url, stream=True, allow_redirects=True, timeout=(30, 300))
+        # confirm page của Drive (file lớn/virus scan)
         if is_drive and "text/html" in r.headers.get("Content-Type", "").lower():
             try:
                 text = r.text
@@ -79,7 +107,7 @@ def _download_zip_to_file(url: str, dest_path: str):
                     m = re.search(r'href="(\/uc\?export=download[^"]+confirm=[^"]+)"', text)
                     if m:
                         confirm_url = "https://drive.google.com" + m.group(1).replace("&amp;", "&")
-                        r = s.get(confirm_url, stream=True, allow_redirects=True, timeout=60)
+                        r = s.get(confirm_url, stream=True, allow_redirects=True, timeout=(30, 300))
             except Exception:
                 pass
 
@@ -253,25 +281,43 @@ def route_command(command: str):
             return _call_tool_module(module_name, command)
     return {"ok": False, "error": "Không nhận dạng được tool từ lệnh. Gõ 'help' để xem hướng dẫn."}
 
-# ===== /api/run-tool =====
+# ===== /api/run-tool — luôn chạy ASYNC cho mọi lệnh =====
 @app.route("/api/run-tool", methods=["POST"])
 def run_tool():
     data = request.get_json(silent=True) or {}
     command = data.get("command", "").strip()
     if not command:
         return jsonify({"error": "Không có lệnh nào được cung cấp"}), 400
-    result = route_command(command)
-    if result.get("ok"):
-        if result.get("help"):
-            return jsonify({"result": result.get("message")})
-        return jsonify({
-            "result": result.get("output"),
-            "module": result.get("module"),
-            "fn": result.get("fn"),
-            "data_dir": result.get("data_dir")
-        })
-    else:
-        return jsonify({"result": result.get("error")})
+
+    job_id = uuid.uuid4().hex
+    JOBS[job_id] = {"status": "queued", "updated": datetime.utcnow()}
+    _gc_jobs()
+    t = threading.Thread(target=_run_command_background, args=(job_id, command), daemon=True)
+    t.start()
+    return jsonify({"job_id": job_id, "status": "queued"}), 202
+
+# ===== /api/run-tool-async (ép nền cho mọi lệnh) =====
+@app.route("/api/run-tool-async", methods=["POST"])
+def run_tool_async():
+    data = request.get_json(silent=True) or {}
+    command = data.get("command", "").strip()
+    if not command:
+        return jsonify({"error": "Không có lệnh nào được cung cấp"}), 400
+
+    job_id = uuid.uuid4().hex
+    JOBS[job_id] = {"status": "queued", "updated": datetime.utcnow()}
+    _gc_jobs()
+    t = threading.Thread(target=_run_command_background, args=(job_id, command), daemon=True)
+    t.start()
+    return jsonify({"job_id": job_id, "status": "queued"}), 202
+
+# ===== /api/job/<id> =====
+@app.route("/api/job/<job_id>", methods=["GET"])
+def get_job(job_id):
+    job = JOBS.get(job_id)
+    if not job:
+        return jsonify({"error": "Job không tồn tại"}), 404
+    return jsonify(job)
 
 # ===== S3 presign & analyze (optional) =====
 @app.route("/api/s3/presign", methods=["POST"])
@@ -309,4 +355,5 @@ def analyze_object():
 
 # ===== Local dev =====
 if __name__ == "__main__":
-    app.run("0.0.0.0", 5000, debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
