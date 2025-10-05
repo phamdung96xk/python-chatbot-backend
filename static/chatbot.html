@@ -84,12 +84,20 @@
         <div class="grow">
           <label for="zipfile">Chọn file .zip (chứa .xml và *_content.txt)</label>
           <input id="zipfile" type="file" accept=".zip" />
-          <div class="hint">Sau khi upload, server sẽ lưu file ở <span class="mono">/tmp/uploads</span>. Mình sẽ tự extract file cần & chèn <span class="mono">path=...</span> vào ô lệnh.</div>
+          <div class="hint">Sau khi upload, server sẽ lưu file ở <span class="mono">/tmp/uploads</span>. Mình sẽ extract file cần và chèn <span class="mono">path=…</span> vào ô lệnh.</div>
         </div>
         <div>
           <button id="uploadBtn" class="secondary">Upload</button>
         </div>
       </div>
+
+      <div class="row" style="margin-top:6px">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input id="autoPathChk" type="checkbox" checked />
+          <span>Tự chèn <span class="mono">path=…</span> vào ô lệnh sau khi upload</span>
+        </label>
+      </div>
+
       <div id="uploadStatus" class="small muted"></div>
       <div id="uploadSaved" class="small"></div>
       <div id="uploadExtract" class="small"></div>
@@ -100,7 +108,7 @@
 
       <div class="autocomplete">
         <label for="cmd">Lệnh (gợi ý; nhấn <span class="kbd">Tab</span> để nhận, hoặc click)</label>
-        <input id="cmd" type="text" placeholder="ví dụ: mi https://drive.google.com/file/d/.../view?usp=sharing" autocomplete="off" />
+        <input id="cmd" type="text" placeholder="ví dụ: md new path=/tmp/uploads/abc" autocomplete="off" />
         <div id="acList" class="ac-list"></div>
       </div>
 
@@ -139,7 +147,6 @@
     </div>
   </div>
 
-  <!-- TẤT CẢ JS bọc trong IIFE để tránh biến global bị trùng -->
   <script>
   (()=>{
 
@@ -150,12 +157,13 @@
     let __dark = false;
     $('#themeBtn').addEventListener('click', ()=>{ __dark=!__dark; document.body.classList.toggle('dark', __dark); });
 
-    // ===== Upload + extract + prefill path
+    // ===== Upload + extract + (clear +) prefill path
     const upBtn = $('#uploadBtn');
     const upInput = $('#zipfile');
     const upStatus = $('#uploadStatus');
     const upSaved  = $('#uploadSaved');
     const upExtract= $('#uploadExtract');
+    const autoPath = $('#autoPathChk');
     const cmdEl = $('#cmd');
 
     async function postJSON(url, body){
@@ -181,12 +189,9 @@
         upExtract.className='success';
         upExtract.textContent = `Đã giải nén tới: ${ex.data_dir}. Sẵn sàng chạy.`;
 
-        // Prefill path
-        let cur = cmdEl.value.trim();
-        if(!/(^|\s)path\s*=/.test(cur)){
-          if(cur.length && !cur.endsWith(' ')) cur += ' ';
-          cur += `path=${ex.data_dir}`;
-          cmdEl.value = cur + ' ';
+        // (MỚI) XÓA TRẮNG rồi chèn path nếu bật auto
+        if (!autoPath || autoPath.checked) {
+          cmdEl.value = `path=${ex.data_dir} `;
         }
         cmdEl.focus();
       }catch(e){
@@ -209,13 +214,8 @@
     function activeACTxt(){ const el = acList.querySelector('.ac-item.active'); return el? el.textContent: null; }
     function moveAC(d){ const items=[...acList.querySelectorAll('.ac-item')]; if(!items.length) return; acIndex=(acIndex+d+items.length)%items.length; items.forEach((el,i)=>el.classList.toggle('active', i===acIndex)); }
     function acceptAC(txt){
-      const cur = cmdEl.value.trim(); const parts = cur.split(/\s+/); let rest='';
-      if(parts.length>=2){
-        if(/^https?:\/\//i.test(parts[1])) rest=' '+parts.slice(1).join(' ');
-        else if(parts.length>2) rest=' '+parts.slice(2).join(' ');
-      }
-      const suffix = (txt==='help'||rest) ? '' : ' ';
-      cmdEl.value = txt + rest + suffix; hideAC(); cmdEl.focus();
+      const suffix = (txt==='help') ? '' : ' ';
+      cmdEl.value = txt + suffix; hideAC(); cmdEl.focus();
     }
 
     cmdEl.addEventListener('input', ()=>{
@@ -243,13 +243,12 @@
     });
     document.addEventListener('click', (e)=>{ if(!acList.contains(e.target) && e.target!==cmdEl) hideAC(); });
     document.querySelectorAll('.pill').forEach(p=> p.addEventListener('click', ()=>{
-      const t = p.textContent.trim(); const cur = cmdEl.value.trim();
-      if(!cur || !cur.startsWith(t)){ cmdEl.value = t + (t==='help'?'':' '); cmdEl.focus(); cmdEl.dispatchEvent(new Event('input')); }
+      const t = p.textContent.trim(); cmdEl.value = t + (t==='help'?'':' '); cmdEl.focus(); cmdEl.dispatchEvent(new Event('input'));
     }));
 
     // ===== Run / Delete / Download / Clear
     const runBtnEl    = $('#runBtn');
-    const delBtnEl    = $('#deleteBtn');   // tên khác để chắc chắn không va chạm
+    const delBtnEl    = $('#deleteBtn');
     const zipBtnEl    = $('#zipBtn');
     const clearBtnEl  = $('#clearBtn');
     const statusEl    = $('#status');
@@ -335,14 +334,15 @@
       }catch(e){ appendLog(`❌ ${e.message}`,'error'); }
     });
 
-    zipBtnEl.addEventListener('click', ()=>{
+    $('#zipBtn').addEventListener('click', ()=>{
       const dataDir = (lastJob||{}).data_dir; if(!dataDir){ alert('Chưa có dữ liệu. Hãy chạy tool trước.'); return; }
       window.open(api(`/api/download-cleaned?data_dir=${encodeURIComponent(dataDir)}`),'_blank');
     });
 
     // ===== Probe link
-    probeBtn.addEventListener('click', async ()=>{
-      const url = probeUrlEl.value.trim(); if(!url){ alert('Nhập link cần phân tích'); return; }
+    $('#probeBtn').addEventListener('click', async ()=>{
+      const url = $('#probeUrl').value.trim(); if(!url){ alert('Nhập link cần phân tích'); return; }
+      const probeBtn = $('#probeBtn'); const probeResult = $('#probeResult');
       probeBtn.disabled=true; probeResult.textContent='Đang phân tích...';
       try{
         const r = await postJSON(api('/analyze-by-url'), { url });
