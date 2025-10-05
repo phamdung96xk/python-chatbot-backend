@@ -6,29 +6,27 @@ from flask_cors import CORS
 
 app = Flask(__name__)
 
-# ===== Config cơ bản =====
+# ===== Config =====
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500MB
 UPLOAD_DIR = "/tmp/uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # ===== CORS =====
-# Không dùng cookie -> supports_credentials=False; origins="*" cho tiện cross-origin
 CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=False)
 
-# ===== S3 client (cho flow presign) =====
-S3_BUCKET = os.environ.get("S3_BUCKET")                 # ví dụ: tv-tools-uploads
+# ===== (Optional) S3 presign =====
+S3_BUCKET = os.environ.get("S3_BUCKET")
 AWS_REGION = os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-1")
-s3 = boto3.client("s3", region_name=AWS_REGION)
+s3 = boto3.client("s3", region_name=AWS_REGION) if S3_BUCKET else None
 
-# ===== Helpers: phân tích ZIP trong memory / trên đĩa =====
+# ===== ZIP helpers =====
 def analyze_zip_stream(body_bytes: bytes) -> dict:
     t0 = time.time()
     try:
         zf = zipfile.ZipFile(io.BytesIO(body_bytes))
         names = zf.namelist()
-        summary = {"num_entries_in_zip": len(names), "sample_first_10": names[:10]}
-        # (TODO) GỌI TOOL THẬT Ở ĐÂY nếu bạn muốn: giải nén -> gọi checker của bạn
-        return {"ok": True, "elapsed_sec": round(time.time()-t0, 3), "summary": summary}
+        return {"ok": True, "elapsed_sec": round(time.time()-t0, 3),
+                "summary": {"num_entries_in_zip": len(names), "sample_first_10": names[:10]}}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
@@ -36,45 +34,68 @@ def analyze_zip_file(zip_path: str) -> dict:
     t0 = time.time()
     try:
         with zipfile.ZipFile(zip_path, "r") as z:
-            z.extractall(UPLOAD_DIR)  # hoặc temp dir riêng nếu muốn dọn dẹp sau
+            z.extractall(UPLOAD_DIR)
             names = z.namelist()
-        # (TODO) GỌI TOOL THẬT ở đây, ví dụ check folder đã extract
         return {"ok": True, "elapsed_sec": round(time.time()-t0, 3),
                 "summary": {"entries": len(names), "sample": names[:10]}}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
-# ===== Helpers: tải file từ URL / Google Drive =====
+# ===== Download helpers =====
+def _normalize_gdrive(url: str) -> str:
+    """Mọi dạng link Drive -> direct download."""
+    m = re.search(r"/file/d/([^/]+)", url)
+    if m: return f"https://drive.google.com/uc?export=download&id={m.group(1)}"
+    m = re.search(r"[?&]id=([^&]+)", url)
+    if m: return f"https://drive.google.com/uc?export=download&id={m.group(1)}"
+    return url
+
 def _download_google_drive(url: str) -> bytes:
-    """Tải file public từ Google Drive, xử lý trang confirm khi file lớn."""
+    """Tải file public từ Google Drive, xử lý confirm, đảm bảo là ZIP."""
+    url = _normalize_gdrive(url)
     with requests.Session() as s:
         r = s.get(url, allow_redirects=True, timeout=60)
-        # Nếu là trang confirm (quét virus), tìm link chứa confirm=
-        if "confirm=" in r.text and "download" in r.text:
+        # Nếu cần confirm
+        if "confirm=" in r.text and "uc?export=download" in r.text:
             m = re.search(r'href="(\/uc\?export=download[^"]+confirm=[^"]+)"', r.text)
             if m:
                 confirm_url = "https://drive.google.com" + m.group(1).replace("&amp;", "&")
                 r = s.get(confirm_url, allow_redirects=True, timeout=60)
         r.raise_for_status()
-        return r.content
+        data = r.content
+        if not (data.startswith(b"PK\x03\x04") or data.startswith(b"PK\x05\x06") or data.startswith(b"PK\x07\x08")):
+            raise ValueError("Nội dung tải về không phải file ZIP (kiểm tra link/chia sẻ).")
+        return data
 
 def _download_generic(url: str) -> bytes:
     with requests.get(url, stream=True, timeout=60) as r:
         r.raise_for_status()
-        return b"".join(chunk for chunk in r.iter_content(1024 * 64) if chunk)
+        data = b"".join(chunk for chunk in r.iter_content(1024 * 64) if chunk)
+        if not (data.startswith(b"PK\x03\x04") or data.startswith(b"PK\x05\x06") or data.startswith(b"PK\x07\x08")):
+            raise ValueError("Nội dung tải về không phải file ZIP.")
+        return data
 
-# ===== Helper: chọn thư mục tốt nhất chứa .xml =====
+# ===== Case-insensitive XML detection =====
+XML_PATTERNS = ["*.xml", "*.[xX][mM][lL]"]  # .xml, .XML, .Xml, ...
+
+def _has_xml(dirpath: str) -> bool:
+    for pat in XML_PATTERNS:
+        if glob.glob(os.path.join(dirpath, pat)):
+            return True
+    return False
+
 def _detect_best_data_dir(root_dir: str) -> str:
-    """Trả về thư mục phù hợp nhất để chạy tool:
+    """Chọn thư mục chạy tool:
        - Nếu có .xml ngay trong root_dir -> dùng root_dir
-       - Nếu .xml nằm trong các thư mục con -> trỏ tới thư mục chứa .xml đầu tiên
+       - Nếu nằm ở thư mục con -> trỏ tới thư mục chứa .xml đầu tiên
     """
     try:
-        if glob.glob(os.path.join(root_dir, "*.xml")):
+        if _has_xml(root_dir):
             return root_dir
-        deep = glob.glob(os.path.join(root_dir, "**", "*.xml"), recursive=True)
-        if deep:
-            return os.path.dirname(deep[0])
+        for pat in XML_PATTERNS:
+            deep = glob.glob(os.path.join(root_dir, "**", pat), recursive=True)
+            if deep:
+                return os.path.dirname(deep[0])
     except Exception:
         pass
     return root_dir
@@ -84,7 +105,7 @@ def _detect_best_data_dir(root_dir: str) -> str:
 def health():
     return jsonify({"status": "ok", "time": time.time()})
 
-# ===== OPTIONS catch-all cho /api/* (đảm bảo preflight không bao giờ fail) =====
+# ===== OPTIONS catch-all =====
 @app.route("/api/<path:any_path>", methods=["OPTIONS"])
 def api_options(any_path):
     resp = make_response("", 204)
@@ -92,28 +113,21 @@ def api_options(any_path):
     resp.headers.setdefault("Access-Control-Allow-Headers", "*")
     return resp
 
-# ===== Upload ZIP trực tiếp tới backend =====
+# ===== Upload ZIP =====
 @app.route("/api/upload-files", methods=["POST", "OPTIONS"])
 def upload_files():
     if request.method == "OPTIONS":
         return ("", 204)
-
     if "file" not in request.files:
         return jsonify({"error": "Thiếu field 'file' trong form-data"}), 400
     f = request.files["file"]
     if f.filename == "":
         return jsonify({"error": "Tên file rỗng"}), 400
-
     save_path = os.path.join(UPLOAD_DIR, f.filename)
     f.save(save_path)
-
-    # (Tuỳ chọn) phân tích ngay sau upload:
-    # result = analyze_zip_file(save_path)
-    # return jsonify({"status": "ok", "filename": f.filename, "saved_to": save_path, "result": result})
-
     return jsonify({"status": "ok", "filename": f.filename, "saved_to": save_path})
 
-# ===== Phân tích qua URL (Google Drive / URL trực tiếp) =====
+# ===== Demo tóm tắt ZIP từ URL =====
 @app.route("/api/analyze-by-url", methods=["POST"])
 def analyze_by_url():
     data = request.get_json(silent=True) or {}
@@ -121,20 +135,15 @@ def analyze_by_url():
     if not url:
         return jsonify({"ok": False, "error": "Missing url"}), 400
     try:
-        if "drive.google.com" in url:
-            body = _download_google_drive(url)
-        else:
-            body = _download_generic(url)
-        result = analyze_zip_stream(body)   # hoặc giải nén ra đĩa & gọi tool thật
+        body = _download_google_drive(url) if "drive.google.com" in url else _download_generic(url)
+        result = analyze_zip_stream(body)
         return jsonify({"ok": True, "source": url, "result": result})
     except Exception as e:
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
 
-# ======== DISPATCHER: map keyword -> module ========
-# Quy ước entrypoint module: ưu tiên gọi lần lượt: run(cmd) -> main(cmd) -> handle(cmd)
+# ===== Dispatcher =====
 TOOL_KEYWORDS = [
-    # (regex pattern (case-insensitive), module_name)
-    (r"\bcivitek\s+new\b", "civitek_new_logic"),  # phải đặt 'civitek new' trước 'civitek'
+    (r"\bcivitek\s+new\b", "civitek_new_logic"),
     (r"\bcivitek\b",       "civitek_logic"),
     (r"\bflager\b",        "flager_logic"),
     (r"\bmi\b",            "mi_logic"),
@@ -151,17 +160,17 @@ HELP_TEXT = (
 )
 
 def _call_tool_module(module_name: str, command: str):
-    """Gọi module theo 3 bước:
+    """Quy trình:
        1) run/main/handle (có tham số hoặc không)
-       1.5) Nếu có URL (url=... hoặc dán trần), tải ZIP & giải nén -> gắn path=... vào command
-       2) Fallback sang run_*_check(directory_path) hiện có trong module
+       1.5) Có URL (url=... hoặc URL trần): tải ZIP, giải nén, gắn path=... (best dir)
+       2) Fallback: run_*_check(directory_path)
     """
     try:
         mod = importlib.import_module(module_name)
     except Exception as e:
         return {"ok": False, "error": f"Không import được module '{module_name}': {e}"}
 
-    # --- B1: thử run/main/handle ---
+    # B1: run/main/handle
     for fn_name in ("run", "main", "handle"):
         fn = getattr(mod, fn_name, None)
         if callable(fn):
@@ -173,10 +182,10 @@ def _call_tool_module(module_name: str, command: str):
                 return {"ok": False, "module": module_name, "fn": fn_name,
                         "error": f"Lỗi khi gọi {module_name}.{fn_name}: {type(e).__name__}: {e}"}
 
-    # --- B1.5: nếu lệnh có URL (url=... hoặc dán trần) ---
+    # B1.5: nhận URL (url=... hoặc URL trần)
     murl = re.search(r"url\s*=\s*([^\s]+)", command, flags=re.I)
     if not murl:
-        murl = re.search(r"(https?://\S+)", command, flags=re.I)  # URL trần
+        murl = re.search(r"(https?://\S+)", command, flags=re.I)
     if murl:
         url_in = murl.group(1)
         try:
@@ -192,7 +201,7 @@ def _call_tool_module(module_name: str, command: str):
         except Exception as e:
             return {"ok": False, "error": f"Tải/Giải nén từ URL lỗi: {type(e).__name__}: {e}"}
 
-    # --- B2: fallback sang run_*_check(dir) ---
+    # B2: fallback run_*_check(dir)
     name_map = {
         "civitek_new_logic": "run_civitek_new_check",
         "civitek_logic":     "run_civitek_check",
@@ -204,7 +213,6 @@ def _call_tool_module(module_name: str, command: str):
     if check_fn_name and hasattr(mod, check_fn_name):
         check_fn = getattr(mod, check_fn_name)
         try:
-            # lấy thư mục dữ liệu từ lệnh: ví dụ "mi path=/tmp/uploads/batch_01"
             m = re.search(r"path\s*=\s*([^\s]+)", command, flags=re.I)
             raw_dir = m.group(1) if m else UPLOAD_DIR
             data_dir = _detect_best_data_dir(raw_dir)
@@ -218,34 +226,24 @@ def _call_tool_module(module_name: str, command: str):
     return {"ok": False, "error": f"Module '{module_name}' không có entry phù hợp (run/main/handle hay run_*_check)."}
 
 def route_command(command: str):
-    """Xác định module theo keyword và gọi module tương ứng."""
     if not command:
         return {"ok": False, "error": "Empty command"}
-
     cmd_lower = command.lower()
-
-    # help
     if re.search(r"\bhelp\b", cmd_lower):
         return {"ok": True, "help": True, "message": HELP_TEXT}
-
-    # civitek new phải match trước civitek thường (đã sắp xếp trên)
     for pattern, module_name in TOOL_KEYWORDS:
         if re.search(pattern, cmd_lower, flags=re.IGNORECASE):
             return _call_tool_module(module_name, command)
-
-    # không match gì
     return {"ok": False, "error": "Không nhận dạng được tool từ lệnh. Gõ 'help' để xem hướng dẫn."}
 
-# ===== Bot (/api/run-tool) dùng dispatcher =====
+# ===== /api/run-tool =====
 @app.route("/api/run-tool", methods=["POST"])
 def run_tool():
     data = request.get_json(silent=True) or {}
     command = data.get("command", "").strip()
     if not command:
         return jsonify({"error": "Không có lệnh nào được cung cấp"}), 400
-
     result = route_command(command)
-    # Trả gọn cho frontend
     if result.get("ok"):
         if result.get("help"):
             return jsonify({"result": result.get("message")})
@@ -258,49 +256,34 @@ def run_tool():
     else:
         return jsonify({"result": result.get("error")})
 
-# ===== S3 presign (upload thẳng S3) =====
+# ===== S3 presign & analyze (optional) =====
 @app.route("/api/s3/presign", methods=["POST"])
 def s3_presign():
-    """Cấp pre-signed POST cho trình duyệt upload trực tiếp lên S3."""
+    if not s3 or not S3_BUCKET:
+        return jsonify({"ok": False, "error": "S3 not configured"}), 400
     data = request.get_json(silent=True) or {}
     filename = data.get("filename", "upload.zip")
     content_type = data.get("contentType", "application/zip")
-    size = int(data.get("size", 0))
-
     safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", filename)
     key = f"uploads/{uuid.uuid4().hex}_{safe_name}"
-
-    # Giới hạn 0 .. 500MB
-    conditions = [
-        {"bucket": S3_BUCKET},
-        {"Content-Type": content_type},
-        ["content-length-range", 0, 500 * 1024 * 1024],
-        {"key": key},
-        {"x-amz-server-side-encryption": "AES256"},
-    ]
-    fields = {
-        "Content-Type": content_type,
-        "x-amz-server-side-encryption": "AES256",
-        "key": key,
-    }
-
     presigned = s3.generate_presigned_post(
-        Bucket=S3_BUCKET,
-        Key=key,
-        Fields=fields,
-        Conditions=conditions,
-        ExpiresIn=600,  # 10 phút
+        Bucket=S3_BUCKET, Key=key,
+        Fields={"Content-Type": content_type, "x-amz-server-side-encryption": "AES256", "key": key},
+        Conditions=[{"bucket": S3_BUCKET}, {"Content-Type": content_type},
+                    ["content-length-range", 0, 500*1024*1024],
+                    {"key": key}, {"x-amz-server-side-encryption": "AES256"}],
+        ExpiresIn=600
     )
     return jsonify({"url": presigned["url"], "fields": presigned["fields"], "key": key})
 
-# ===== Phân tích object trên S3 sau khi upload xong =====
 @app.route("/api/analyze", methods=["POST"])
 def analyze_object():
+    if not s3 or not S3_BUCKET:
+        return jsonify({"ok": False, "error": "S3 not configured"}), 400
     data = request.get_json(silent=True) or {}
     key = data.get("key")
     if not key:
         return jsonify({"ok": False, "error": "Missing key"}), 400
-
     buf = io.BytesIO()
     s3.download_fileobj(S3_BUCKET, key, buf)
     buf.seek(0)
