@@ -145,6 +145,51 @@ def _detect_best_data_dir(root_dir: str) -> str:
         pass
     return root_dir
 
+# ===== Drive visibility probe =====
+def _probe_drive_visibility(url: str):
+    """Kiểm tra nhanh link Drive có public không (Anyone with the link).
+       Trả về: {"public": bool, "reason": str, "normalized_url": str}
+    """
+    norm = _normalize_gdrive(url)
+    try:
+        with requests.Session() as s:
+            r = s.get(norm, headers={"Range": "bytes=0-512"}, stream=True,
+                      allow_redirects=True, timeout=(10, 20))
+            status = r.status_code
+            ctype = (r.headers.get("Content-Type") or "").lower()
+            cdisp = (r.headers.get("Content-Disposition") or "").lower()
+
+            if status in (401, 403):
+                return {"public": False, "reason": f"HTTP {status} (cần quyền)", "normalized_url": norm}
+            if status == 404:
+                return {"public": False, "reason": "HTTP 404 (không tồn tại/không truy cập được)", "normalized_url": norm}
+
+            if "text/html" in ctype:
+                try:
+                    snippet = r.raw.read(512, decode_content=True) or b""
+                    text = snippet.decode("utf-8", errors="ignore").lower()
+                    if ("you need access" in text or "request access" in text
+                        or "sign in" in text or "accounts.google.com" in text):
+                        return {"public": False, "reason": "Drive báo cần đăng nhập/đòi quyền", "normalized_url": norm}
+                except Exception:
+                    pass
+
+            if "attachment" in cdisp:
+                return {"public": True, "reason": "Có header tải xuống (Content-Disposition)", "normalized_url": norm}
+
+            try:
+                r2 = s.get(norm, headers={"Range": "bytes=0-8"}, stream=True,
+                           allow_redirects=True, timeout=(10, 20))
+                head = next(r2.iter_content(16), b"")
+                if head.startswith(b"PK\x03\x04") or head.startswith(b"PK\x05\x06") or head.startswith(b"PK\x07\x08"):
+                    return {"public": True, "reason": "Nhận diện chữ ký ZIP", "normalized_url": norm}
+            except Exception:
+                pass
+
+            return {"public": True, "reason": "Truy cập được (không thấy dấu hiệu chặn)", "normalized_url": norm}
+    except Exception as e:
+        return {"public": False, "reason": f"Lỗi probe: {type(e).__name__}: {e}", "normalized_url": norm}
+
 # ===== Health =====
 @app.route("/api/health", methods=["GET"])
 def health():
@@ -172,7 +217,7 @@ def upload_files():
     f.save(save_path)
     return jsonify({"status": "ok", "filename": f.filename, "saved_to": save_path})
 
-# ===== Demo tóm tắt ZIP từ URL =====
+# ===== Demo tóm tắt ZIP từ URL + PROBE Drive visibility =====
 @app.route("/api/analyze-by-url", methods=["POST"])
 def analyze_by_url():
     data = request.get_json(silent=True) or {}
@@ -180,17 +225,37 @@ def analyze_by_url():
     if not url:
         return jsonify({"ok": False, "error": "Missing url"}), 400
     try:
+        visibility = None
+        if "drive.google.com" in url:
+            visibility = _probe_drive_visibility(url)
+            if not visibility.get("public"):
+                return jsonify({
+                    "ok": False,
+                    "visibility": visibility,
+                    "error": "Link Drive chưa công khai (Anyone with the link)."
+                }), 400
+            url = visibility.get("normalized_url", url)
+
         tmp = os.path.join(UPLOAD_DIR, f"tmp_{uuid.uuid4().hex}.zip")
         _download_zip_to_file(url, tmp)
         with open(tmp, "rb") as f:
             result = analyze_zip_stream(f.read())
-        return jsonify({"ok": True, "source": url, "result": result})
+
+        return jsonify({
+            "ok": True,
+            "source": url,
+            "visibility": visibility or {"public": True, "reason": "URL thường"},
+            "result": result
+        })
     except Exception as e:
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
 
 # ===== Dispatcher =====
 TOOL_KEYWORDS = [
+    # "new" trước để không bị nuốt bởi pattern thường
     (r"\bcivitek\s+new\b", "civitek_new_logic"),
+    (r"\bmd\s+new\b",      "md_new_logic"),
+
     (r"\bcivitek\b",       "civitek_logic"),
     (r"\bflager\b",        "flager_logic"),
     (r"\bmi\b",            "mi_logic"),
@@ -198,12 +263,13 @@ TOOL_KEYWORDS = [
 ]
 
 HELP_TEXT = (
-    "Tool \"civitek_logic.py\" từ khóa \"civitek\" (viết hoa viết thường đều được), "
-    "\"flager_logic.py\" từ khóa \"flager\" (viết hoa viết thường đều được), "
-    "\"mi_logic.py\" từ khóa \"MI\" (viết hoa viết thường đều được), "
-    "\"md_logic.py\" từ khóa \"MD\" (viết hoa viết thường đều được), "
-    "\"civitek_new_logic.py\" từ khóa \"civitek new\". "
-    "Hướng dẫn sử dụng thì ghi như nội dung tôi vừa gửi bạn đây từ khóa \"help\"."
+    'Tool "civitek_logic.py" từ khóa "civitek" (viết hoa viết thường đều được), '
+    '"flager_logic.py" từ khóa "flager" (viết hoa viết thường đều được), '
+    '"mi_logic.py" từ khóa "mi" (viết hoa viết thường đều được), '
+    '"md_logic.py" từ khóa "md" (viết hoa viết thường đều được), '
+    '"md_new_logic" từ khóa "md new" (viết hoa viết thường đều được), '
+    '"civitek_new_logic.py" từ khóa "civitek new". '
+    'Hướng dẫn sử dụng thì ghi như nội dung tôi vừa gửi bạn đây từ khóa "help".'
 )
 
 def _call_tool_module(module_name: str, command: str):
@@ -253,6 +319,7 @@ def _call_tool_module(module_name: str, command: str):
         "flager_logic":      "run_flager_check",
         "mi_logic":          "run_mi_check",
         "md_logic":          "run_md_check",
+        "md_new_logic":      "run_md_new_check",
     }
     check_fn_name = name_map.get(module_name)
     if check_fn_name and hasattr(mod, check_fn_name):

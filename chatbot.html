@@ -27,7 +27,7 @@
       <!-- Hàng nhập lệnh (Chat tới /api/run-tool) -->
       <div class="flex items-center gap-2">
         <input id="user-input" class="flex-1 border rounded-lg p-2 focus:outline-none focus:ring focus:border-blue-400"
-               placeholder="Nhập lệnh (ví dụ: 'mi url=<link>', 'civitek <link>')..." />
+               placeholder="Nhập lệnh (ví dụ: 'mi <link>', 'civitek <link>')..." />
         <button id="send-btn"
                 class="bg-blue-600 text-white px-3 py-2 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-400">
           Gửi
@@ -241,11 +241,23 @@
           mode: 'cors'
         });
         const data = await res.json();
+
+        // Hiển thị trạng thái công khai (visibility) nếu có
+        if (data.visibility) {
+          if (data.visibility.public === false) {
+            addMessage('❌ Link Drive chưa công khai. Vào Google Drive → Share → General access: "Anyone with the link".', 'bot');
+            addMessage(`<pre class="text-xs md:text-sm">${JSON.stringify(data.visibility, null, 2)}</pre>`, 'bot', true);
+          } else {
+            addMessage(`✅ Link công khai: ${data.visibility.reason || 'OK'}`, 'bot');
+          }
+        }
+
         if(!res.ok || data.ok === false){
           addMessage('❌ Lỗi: ' + (data.error || res.statusText), 'bot'); return;
         }
-        addMessage('✅ Đã phân tích xong.', 'bot');
-        addMessage(`<pre class="text-xs md:text-sm">${JSON.stringify(data, null, 2)}</pre>`, 'bot', true);
+
+        addMessage('✅ Đã phân tích xong ZIP.', 'bot');
+        addMessage(`<pre class="text-xs md:text-sm">${JSON.stringify(data.result, null, 2)}</pre>`, 'bot', true);
       }catch(e){
         addMessage('❌ Lỗi kết nối/phân tích: ' + e.message, 'bot');
       }
