@@ -5,30 +5,23 @@ from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, make_response, send_file, redirect
 from flask_cors import CORS
 
-# boto3 là tùy chọn (S3 presign)
 try:
     import boto3  # type: ignore
 except Exception:
     boto3 = None
 
-# ===== Flask app: serve static ./static (chatbot.html) =====
 app = Flask(__name__, static_folder="static", static_url_path="/static")
-
-# ===== Config =====
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500MB
 UPLOAD_DIR = "/tmp/uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# ===== CORS (giữ nguyên; same-origin vẫn OK) =====
 CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=False)
 
-# ===== (Optional) S3 presign =====
 S3_BUCKET = os.environ.get("S3_BUCKET")
 AWS_REGION = os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-1")
 s3 = boto3.client("s3", region_name=AWS_REGION) if (boto3 and S3_BUCKET) else None
 
-# ===== Async job store =====
-JOBS = {}  # job_id -> {"status": "queued|running|done|error", "result": ..., "error": ..., "updated": datetime}
+JOBS = {}  # job_id -> {"status": "...", "result": ..., "error": ..., "updated": datetime}
 
 def _gc_jobs(hours: int = 6):
     cutoff = datetime.utcnow() - timedelta(hours=hours)
@@ -42,7 +35,7 @@ def _run_command_background(job_id: str, command: str):
         res = route_command(command)
         if res.get("ok"):
             if res.get("help"):
-                out = {"result": res.get("message")}
+                out = {"result": res.get("message"), "help": True}
             else:
                 out = {
                     "result": res.get("output"),
@@ -56,7 +49,6 @@ def _run_command_background(job_id: str, command: str):
     except Exception as e:
         JOBS[job_id] = {"status": "error", "error": f"{type(e).__name__}: {e}", "updated": datetime.utcnow()}
 
-# ===== ZIP helpers =====
 def analyze_zip_stream(body_bytes: bytes) -> dict:
     t0 = time.time()
     try:
@@ -78,7 +70,6 @@ def analyze_zip_file(zip_path: str) -> dict:
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
-# ===== Download & normalize helpers =====
 def _normalize_gdrive(url: str) -> str:
     m = re.search(r"/file/d/([^/]+)", url)
     if m:
@@ -113,7 +104,6 @@ def _download_zip_to_file(url: str, dest_path: str):
     if not zipfile.is_zipfile(dest_path):
         raise ValueError("Nội dung tải về không phải file ZIP.")
 
-# ====== Canonical data dir (áp dụng cho mọi tool) ======
 XML_PATTERNS = ["*.xml", "*.[xX][mM][lL]"]
 TXT_PATTERNS = ["*_content.txt", "*_CONTENT.TXT", "*_Content.txt"]
 
@@ -163,7 +153,6 @@ def _canonical_data_dir(root_dir: str) -> str:
         return found
     return root_dir
 
-# ===== Drive visibility probe =====
 def _probe_drive_visibility(url: str):
     norm = _normalize_gdrive(url)
     try:
@@ -200,12 +189,10 @@ def _probe_drive_visibility(url: str):
     except Exception as e:
         return {"public": False, "reason": f"Lỗi probe: {type(e).__name__}: {e}", "normalized_url": norm}
 
-# ===== Health =====
 @app.route("/api/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "time": time.time()})
 
-# ===== OPTIONS catch-all =====
 @app.route("/api/<path:any_path>", methods=["OPTIONS"])
 def api_options(any_path):
     resp = make_response("", 204)
@@ -213,7 +200,6 @@ def api_options(any_path):
     resp.headers.setdefault("Access-Control-Allow-Headers", "*")
     return resp
 
-# ===== Upload ZIP =====
 @app.route("/api/upload-files", methods=["POST", "OPTIONS"])
 def upload_files():
     if request.method == "OPTIONS":
@@ -227,7 +213,6 @@ def upload_files():
     f.save(save_path)
     return jsonify({"status": "ok", "filename": f.filename, "saved_to": save_path})
 
-# ===== Demo tóm tắt ZIP từ URL + PROBE Drive visibility =====
 @app.route("/api/analyze-by-url", methods=["POST"])
 def analyze_by_url():
     data = request.get_json(silent=True) or {}
@@ -260,7 +245,6 @@ def analyze_by_url():
     except Exception as e:
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
 
-# ===== Dispatcher =====
 TOOL_KEYWORDS = [
     (r"\bcivitek\s+new\b", "civitek_new_logic"),
     (r"\bmd\s+new\b",      "md_new_logic"),
@@ -271,13 +255,14 @@ TOOL_KEYWORDS = [
 ]
 
 HELP_TEXT = (
-    'Tool "civitek_logic.py" từ khóa "civitek", '
-    '"flager_logic.py" từ khóa "flager", '
-    '"mi_logic.py" từ khóa "mi", '
-    '"md_logic.py" từ khóa "md", '
-    '"md_new_logic" từ khóa "md new", '
-    '"civitek_new_logic.py" từ khóa "civitek new". '
-    'Gõ "help" để xem hướng dẫn.'
+    "HƯỚNG DẪN NHANH:\n"
+    "• Civitek: gõ \"civitek <dấu cách> (link google drive)\"\n"
+    "• Civitek new: gõ \"civitek new <dấu cách> (link google drive)\"\n"
+    "• Flager: gõ \"flager <dấu cách> (link google drive)\"\n"
+    "• MI: gõ \"mi <dấu cách> (link google drive)\"\n"
+    "• MD: gõ \"md <dấu cách> (link google drive)\"\n"
+    "• MD New: gõ \"md new <dấu cách> (link google drive)\"\n"
+    "Mẹo: dùng gợi ý (autocomplete) cho nhanh."
 )
 
 def _call_tool_module(module_name: str, command: str):
@@ -286,7 +271,6 @@ def _call_tool_module(module_name: str, command: str):
     except Exception as e:
         return {"ok": False, "error": f"Không import được module '{module_name}': {e}"}
 
-    # 1) run/main/handle
     for fn_name in ("run", "main", "handle"):
         fn = getattr(mod, fn_name, None)
         if callable(fn):
@@ -298,7 +282,6 @@ def _call_tool_module(module_name: str, command: str):
                 return {"ok": False, "module": module_name, "fn": fn_name,
                         "error": f"Lỗi khi gọi {module_name}.{fn_name}: {type(e).__name__}: {e}"}
 
-    # 1.5) URL -> tải & giải nén -> gắn path nếu chưa có
     murl = re.search(r"url\s*=\s*([^\s]+)", command, flags=re.I)
     if not murl:
         murl = re.search(r"(https?://\S+)", command, flags=re.I)
@@ -316,7 +299,6 @@ def _call_tool_module(module_name: str, command: str):
         except Exception as e:
             return {"ok": False, "error": f"Tải/Giải nén từ URL lỗi: {type(e).__name__}: {e}"}
 
-    # 2) run_*_check(dir)
     name_map = {
         "civitek_new_logic": "run_civitek_new_check",
         "civitek_logic":     "run_civitek_check",
@@ -360,7 +342,6 @@ def route_command(command: str):
             return _call_tool_module(module_name, command)
     return {"ok": False, "error": "Không nhận dạng được tool từ lệnh. Gõ 'help' để xem hướng dẫn."}
 
-# ===== /api/run-tool — chạy ASYNC =====
 @app.route("/api/run-tool", methods=["POST"])
 def run_tool():
     data = request.get_json(silent=True) or {}
@@ -385,7 +366,6 @@ def run_tool_async():
     threading.Thread(target=_run_command_background, args=(job_id, command), daemon=True).start()
     return jsonify({"job_id": job_id, "status": "queued"}), 202
 
-# ===== /api/job/<id> =====
 @app.route("/api/job/<job_id>", methods=["GET"])
 def get_job(job_id):
     job = JOBS.get(job_id)
@@ -393,7 +373,6 @@ def get_job(job_id):
         return jsonify({"error": "Job không tồn tại"}), 404
     return jsonify(job)
 
-# ===== S3 presign & analyze (optional) =====
 @app.route("/api/s3/presign", methods=["POST"])
 def s3_presign():
     if not s3 or not S3_BUCKET:
@@ -427,7 +406,6 @@ def analyze_object():
     result = analyze_zip_stream(buf.read())
     return jsonify({"ok": True, "key": key, "result": result})
 
-# ====== Smart delete error lines ======
 ID_PAT = re.compile(r"\bID\s*:\s*([A-Za-z0-9._\-]+)", re.I)
 
 def _extract_error_ids_from_log(log_text: str):
@@ -499,7 +477,6 @@ def delete_error_lines():
         "reports": reports
     })
 
-# ===== Download cleaned files =====
 @app.route("/api/download-cleaned-one", methods=["GET"])
 def download_cleaned_one():
     data_dir = request.args.get("data_dir", "").strip()
@@ -555,7 +532,6 @@ def download_cleaned_zip():
     zip_name = f"cleaned_{ts}.zip"
     return send_file(mem, as_attachment=True, download_name=zip_name, mimetype="application/zip")
 
-# ======= Serve chatbot.html (same-origin) =======
 @app.get("/chatbot.html")
 def chatbot_page():
     return app.send_static_file("chatbot.html")
@@ -564,7 +540,6 @@ def chatbot_page():
 def index():
     return redirect("/chatbot.html")
 
-# ===== Local dev =====
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

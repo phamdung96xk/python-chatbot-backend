@@ -61,6 +61,8 @@
     .ac-item:first-child{border-top:none}
     .ac-item:hover, .ac-item.active{background:var(--soft)}
     .badge{font-size:11px;border:1px solid var(--border);padding:2px 6px;border-radius:999px;margin-left:8px;color:var(--muted)}
+    .help{background:#eef6ff;border:1px dashed var(--border);border-radius:10px;padding:10px;margin-top:10px;color:#0b1020;display:none}
+    .dark .help{background:#0f1a36;color:#e8ecf1}
   </style>
 </head>
 <body>
@@ -101,11 +103,13 @@
       <div class="row">
         <button id="runBtn">Chạy lệnh</button>
         <button id="deleteBtn" class="danger" disabled>Xóa dòng lỗi (tự lấy ID từ log)</button>
+        <button id="zipBtn" class="secondary" disabled>Tải file _content.txt đã sửa (ZIP)</button>
         <button id="clearBtn" class="secondary">Xóa log</button>
       </div>
 
       <div class="sep"></div>
       <div class="muted" id="status">Sẵn sàng.</div>
+      <div id="helpBox" class="help"></div>
       <div class="logs" id="logs" aria-live="polite"></div>
     </div>
 
@@ -140,15 +144,17 @@
     const cmdEl = document.getElementById('cmd');
     const runBtn = document.getElementById('runBtn');
     const deleteBtn = document.getElementById('deleteBtn');
+    const zipBtn = document.getElementById('zipBtn');
     const clearBtn = document.getElementById('clearBtn');
     const statusEl = document.getElementById('status');
     const logsEl = document.getElementById('logs');
+    const helpBox = document.getElementById('helpBox');
 
     const probeUrlEl = document.getElementById('probeUrl');
     const probeBtn = document.getElementById('probeBtn');
     const probeResult = document.getElementById('probeResult');
 
-    /* ===== Autocomplete dropdown (Tab/click only) ===== */
+    /* ===== Autocomplete dropdown (Tab/click only). Enter = chạy lệnh ===== */
     const acList = document.getElementById('acList');
     let acIndex = -1;
 
@@ -205,7 +211,7 @@
       }
     });
 
-    // Chỉ Tab để nhận gợi ý; Enter dùng để chạy lệnh
+    // Tab nhận gợi ý; Enter chạy lệnh (không autocomplete)
     cmdEl.addEventListener('keydown', (e)=>{
       if (acList.style.display === 'block'){
         if (e.key === 'ArrowDown'){ e.preventDefault(); moveAC(1); }
@@ -217,7 +223,7 @@
           hideAC();
         } else if (e.key === 'Enter'){
           e.preventDefault();
-          runBtn.click(); // chạy lệnh, không autocomplete
+          runBtn.click();
         }
       } else {
         if (e.key === 'Tab'){
@@ -226,7 +232,7 @@
           if (m.length){ e.preventDefault(); acceptAC(m[0]); }
         } else if (e.key === 'Enter'){
           e.preventDefault();
-          runBtn.click(); // chạy lệnh khi không mở dropdown
+          runBtn.click();
         }
       }
     });
@@ -237,6 +243,7 @@
 
     /* ===== Helpers ===== */
     function appendLog(msg, css='') {
+      if (!msg) return;
       const line = document.createElement('div');
       if (css) line.className = css;
       line.textContent = msg;
@@ -262,44 +269,59 @@
       }
       return res.json();
     }
+    function showHelpBox(text){ helpBox.textContent = text || ''; helpBox.style.display = 'block'; }
+    function hideHelpBox(){ helpBox.textContent = ''; helpBox.style.display = 'none'; }
 
-    /* ===== Run / Delete flow ===== */
+    /* ===== Run / Delete / Download flow ===== */
     runBtn.addEventListener('click', async () => {
       const command = cmdEl.value.trim();
       if (!command) { alert('Nhập lệnh'); return; }
 
-      runBtn.disabled = true; deleteBtn.disabled = true;
+      runBtn.disabled = true; deleteBtn.disabled = true; zipBtn.disabled = true;
       setStatus('Đang gửi lệnh...');
-      logsEl.innerHTML = '';
+      logsEl.innerHTML = ''; hideHelpBox();
 
       try {
-        const start = await callJSON(api('/run-tool'), { command });
+        const start = await callJSON(api('/run-tool-async'), { command });
         const jobId = start.job_id;
         appendLog(`🔎 Job: ${jobId}`);
 
-        let done = false, dataDir = null, resultText = '';
+        let done = false, dataDir = null, resultText = '', isHelp = false;
         while (!done) {
           const j = await fetch(api(`/job/${jobId}`)).then(r=>r.json());
           if (j.status === 'done') {
             done = true;
             const r = j.result || {};
+            isHelp = !!r.help;                                // <-- xử lý help
             resultText = (r.result ?? r.output ?? '') + '';
             dataDir = r.data_dir || null;
+
             if (resultText) appendLog(resultText);
             setStatus('Hoàn tất.');
+
+            if (isHelp){
+              // help chỉ hiện hướng dẫn, không trích ID/không bật xóa
+              showHelpBox(resultText);
+              lastJob = { data_dir:null, log_text:'' };
+              runBtn.disabled = false;
+              deleteBtn.disabled = true;
+              zipBtn.disabled = true;
+              return;
+            }
           } else if (j.status === 'error') {
             done = true;
             setStatus('Lỗi.');
             appendLog(`❌ ${j.error || 'Lỗi không xác định'}`, 'error');
           } else {
             setStatus('Đang xử lý...');
-            await new Promise(rs=>setTimeout(rs, 1000));
+            await new Promise(rs=>setTimeout(rs, 900));
           }
         }
 
         lastJob = { data_dir: dataDir, log_text: resultText };
         const ids = extractIdsFromLog(resultText);
         deleteBtn.disabled = !(ids.length && dataDir);
+        zipBtn.disabled = !dataDir;
 
         if (!dataDir) appendLog('⚠️ Không có data_dir từ server nên không thể xóa dòng lỗi tự động.', 'error');
         else appendLog(`📁 Data dir: ${dataDir}`, 'muted');
@@ -316,8 +338,10 @@
 
     clearBtn.addEventListener('click', () => {
       logsEl.innerHTML = '';
+      hideHelpBox();
       setStatus('Đã xóa log.');
       deleteBtn.disabled = true;
+      zipBtn.disabled = true;
     });
 
     deleteBtn.addEventListener('click', async () => {
@@ -349,10 +373,10 @@
 
         const modified = res.modified_files || [];
         if (modified.length === 1) {
-          const url = api(`/download-cleaned-one?data_dir=${encodeURIComponent(lastJob.data_dir)}&name=${encodeURIComponent(modified[0])}`);
+          const url = api(`/api/download-cleaned-one?data_dir=${encodeURIComponent(lastJob.data_dir)}&name=${encodeURIComponent(modified[0])}`);
           window.open(url, "_blank");
         } else if (modified.length > 1) {
-          const url = api(`/download-cleaned?data_dir=${encodeURIComponent(lastJob.data_dir)}&names=${encodeURIComponent(modified.join(","))}`);
+          const url = api(`/api/download-cleaned?data_dir=${encodeURIComponent(lastJob.data_dir)}&names=${encodeURIComponent(modified.join(","))}`);
           window.open(url, "_blank");
         } else {
           appendLog('ℹ️ Không có file nào thay đổi (có thể không line nào khớp ID).', 'muted');
@@ -360,6 +384,14 @@
       } catch (e) {
         appendLog(`❌ ${e.message}`, 'error');
       }
+    });
+
+    /* Tải ZIP file _content.txt đã sửa (nếu chỉ bấm riêng) */
+    zipBtn.addEventListener('click', ()=>{
+      const dataDir = lastJob.data_dir;
+      if (!dataDir){ alert('Chưa có dữ liệu. Hãy chạy tool trước.'); return; }
+      const url = api(`/api/download-cleaned?data_dir=${encodeURIComponent(dataDir)}`);
+      window.open(url, "_blank");
     });
 
     /* Phân tích link */
