@@ -6,15 +6,23 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root{
-      --bg:#0b1020; --fg:#e8ecf1; --muted:#aab3c5; --card:#121830; --accent:#4da3ff; --danger:#ff5c7a; --ok:#21d19f;
+      --bg:#f7f9fc; --fg:#0b1020; --muted:#5a6a85; --card:#ffffff; --accent:#2563eb; --danger:#e11d48; --ok:#10b981;
+      --border:#e5e9f2; --soft:#f0f4fa;
       --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      --sans: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
+      --sans: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      --shadow: 0 8px 24px rgba(0,0,0,.08);
+    }
+    .dark{
+      --bg:#0b1020; --fg:#e8ecf1; --muted:#aab3c5; --card:#121830; --accent:#4da3ff; --danger:#ff5c7a; --ok:#21d19f;
+      --border:#273054; --soft:#0e1430;
+      --shadow: 0 8px 24px rgba(0,0,0,.25);
     }
     *{box-sizing:border-box}
     body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 var(--sans);}
-    a{color:#a7c8ff;text-decoration:none} a:hover{text-decoration:underline}
+    a{color:#0b5ad9;text-decoration:none} a:hover{text-decoration:underline}
+    .dark a{color:#a7c8ff}
     .wrap{max-width:980px;margin:26px auto;padding:0 16px;}
-    .card{background:var(--card);border-radius:14px;padding:16px 18px;box-shadow:0 6px 24px rgba(0,0,0,.25);margin-bottom:16px}
+    .card{background:var(--card);border-radius:14px;padding:16px 18px;box-shadow:var(--shadow);margin-bottom:16px;border:1px solid var(--border)}
     h1{font-size:20px;margin:0 0 4px}
     h2{font-size:16px;margin:0 0 8px}
     .toprow{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
@@ -22,28 +30,41 @@
     .row{display:flex;gap:10px;flex-wrap:wrap;margin:8px 0}
     .grow{flex:1}
     label{display:block;margin:10px 0 6px;font-weight:600;color:var(--muted)}
-    input[type=text]{width:100%;padding:10px 12px;border-radius:10px;border:1px solid #2a3558;background:#0e1430;color:var(--fg);font-family:var(--mono)}
-    input[type=text]::placeholder{color:#6f7995}
+    input[type=text]{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--border);background:#fff;color:var(--fg);font-family:var(--mono)}
+    .dark input[type=text]{background:var(--soft);border-color:#2a3558}
+    input[type=text]::placeholder{color:#8a97ad}
     button{appearance:none;border:0;border-radius:10px;padding:10px 14px;background:var(--accent);color:#fff;font-weight:600;cursor:pointer}
-    button.secondary{background:#2a3558}
+    button.secondary{background:#7087a7;color:#fff}
+    .dark button.secondary{background:#2a3558}
     button.danger{background:var(--danger)}
     button:disabled{opacity:.6;cursor:not-allowed}
-    .logs{white-space:pre-wrap;background:#0e1430;border-radius:10px;padding:12px;font-family:var(--mono);font-size:13px;max-height:440px;overflow:auto;border:1px solid #273054}
+    .logs{white-space:pre-wrap;background:#fff;border-radius:10px;padding:12px;font-family:var(--mono);font-size:13px;max-height:440px;overflow:auto;border:1px solid var(--border)}
+    .dark .logs{background:var(--soft);border-color:#273054}
     .muted{color:var(--muted)}
-    .pill{display:inline-block;background:#1b2446;border:1px solid #2a3558;padding:4px 8px;border-radius:999px;margin:3px 6px 0 0;font-family:var(--mono);font-size:12px;color:#cfe1ff;cursor:pointer}
-    .hint{font-size:12px;color:#91a2c6;margin-top:6px}
-    .sep{height:1px;background:#233054;margin:14px 0}
+    .pill{display:inline-block;background:#eef3ff;border:1px solid var(--border);padding:4px 8px;border-radius:999px;margin:3px 6px 0 0;font-family:var(--mono);font-size:12px;color:#113a9b;cursor:pointer}
+    .dark .pill{background:#1b2446;border-color:#2a3558;color:#cfe1ff}
+    .hint{font-size:12px;color:#71809b;margin-top:6px}
+    .sep{height:1px;background:var(--border);margin:14px 0}
     .success{color:var(--ok)}
     .error{color:var(--danger)}
-    .kbd{border:1px solid #3a456e;border-bottom-width:2px;border-radius:6px;padding:0 6px;display:inline-block;line-height:20px;background:#0e1430;font-family:var(--mono)}
-    .save{font-size:12px;margin-left:8px;color:#9bb3e8;cursor:pointer}
+    .kbd{border:1px solid var(--border);border-bottom-width:2px;border-radius:6px;padding:0 6px;display:inline-block;line-height:20px;background:#fff;font-family:var(--mono)}
+    .dark .kbd{background:var(--soft);border-color:#3a456e}
     .small{font-size:12px}
-    .code{font-family:var(--mono);background:#0e1430;border:1px solid #273054;border-radius:8px;padding:6px 8px;display:inline-block}
+    .code{font-family:var(--mono);background:#fff;border:1px solid var(--border);border-radius:8px;padding:6px 8px;display:inline-block}
+    .dark .code{background:var(--soft);border-color:#273054}
+    .autocomplete{position:relative;}
+    .ac-list{
+      position:absolute;left:0;right:0;top:100%;z-index:10;background:var(--card);border:1px solid var(--border);
+      border-radius:10px;margin-top:6px;box-shadow:var(--shadow);overflow:hidden;display:none;
+    }
+    .ac-item{padding:10px 12px;cursor:pointer;border-top:1px solid var(--border);}
+    .ac-item:first-child{border-top:none}
+    .ac-item:hover, .ac-item.active{background:var(--soft)}
+    .badge{font-size:11px;border:1px solid var(--border);padding:2px 6px;border-radius:999px;margin-left:8px;color:var(--muted)}
   </style>
 </head>
 <body>
   <div class="wrap">
-    <!-- CARD: Header + Backend -->
     <div class="card">
       <div class="toprow">
         <div>
@@ -52,19 +73,19 @@
         </div>
         <div class="guide">
           📘 <a href="https://docs.google.com/document/d/1TnY6_Dn2Sg5DzIaXpKrUBzRIFrTy9c534mR2DMijsMg/edit?usp=sharing" target="_blank" rel="noopener">Hướng dẫn sử dụng</a>
+          <span class="badge"><button id="themeBtn" class="secondary" style="padding:6px 10px;border-radius:8px">Dark/Light</button></span>
         </div>
       </div>
-
-      <label for="backend">Backend URL <span id="saveBackend" class="save" title="Lưu vào trình duyệt">(lưu)</span></label>
-      <input id="backend" type="text" placeholder="https://your-app.onrender.com" />
-      <div class="small muted">Mẹo: có thể dán luôn đường dẫn như <span class="code">https://python-chatbot-backend-xxxx.onrender.com</span></div>
     </div>
 
-    <!-- CARD: Chạy lệnh -->
     <div class="card">
       <h2>Chạy lệnh</h2>
-      <label for="cmd">Lệnh (autocomplete; nhấn <span class="kbd">Tab</span> để nhận gợi ý)</label>
-      <input id="cmd" type="text" placeholder="ví dụ: mi https://drive.google.com/file/d/.../view?usp=sharing" autocomplete="off" />
+
+      <div class="autocomplete">
+        <label for="cmd">Lệnh (gợi ý; nhấn <span class="kbd">Tab</span> để nhận, hoặc click)</label>
+        <input id="cmd" type="text" placeholder="ví dụ: mi https://drive.google.com/file/d/.../view?usp=sharing" autocomplete="off" />
+        <div id="acList" class="ac-list"></div>
+      </div>
 
       <div class="hint">
         Gợi ý nhanh:
@@ -88,7 +109,6 @@
       <div class="logs" id="logs" aria-live="polite"></div>
     </div>
 
-    <!-- CARD: Phân tích link (tùy chọn) -->
     <div class="card">
       <h2>Phân tích link (tùy chọn)</h2>
       <label for="probeUrl">Link Google Drive (ZIP) hoặc URL thường</label>
@@ -101,11 +121,22 @@
   </div>
 
   <script>
-    // ====== Autocomplete lệnh với Tab ======
-    const COMMANDS = ["civitek","civitek new","flager","mi","md","md new","help"];
+    /* Same-origin API */
+    function api(path){
+      const base = window.location.origin;
+      return base + (path.startsWith('/api') ? path : '/api' + path);
+    }
 
-    const backendEl = document.getElementById('backend');
-    const saveBackendEl = document.getElementById('saveBackend');
+    const COMMANDS = ["civitek","civitek new","flager","mi","md","md new","help"];
+    let lastJob = { data_dir: null, log_text: "" };
+    let dark = false;
+
+    const themeBtn = document.getElementById('themeBtn');
+    themeBtn.addEventListener('click', () => {
+      dark = !dark;
+      document.body.classList.toggle('dark', dark);
+    });
+
     const cmdEl = document.getElementById('cmd');
     const runBtn = document.getElementById('runBtn');
     const deleteBtn = document.getElementById('deleteBtn');
@@ -117,38 +148,94 @@
     const probeBtn = document.getElementById('probeBtn');
     const probeResult = document.getElementById('probeResult');
 
-    // Nhớ BACKEND_URL trong localStorage
-    (function initBackend(){
-      const saved = localStorage.getItem('BACKEND_URL');
-      if (saved) backendEl.value = saved;
-    })();
+    /* ===== Autocomplete dropdown (Tab/click only) ===== */
+    const acList = document.getElementById('acList');
+    let acIndex = -1;
 
-    saveBackendEl.addEventListener('click', ()=>{
-      const v = backendEl.value.trim();
-      if (!v){ alert('Nhập BACKEND_URL trước khi lưu.'); return; }
-      localStorage.setItem('BACKEND_URL', v);
-      setStatus('Đã lưu BACKEND_URL vào trình duyệt.');
+    function showAC(items){
+      acList.innerHTML = '';
+      if (!items.length){ acList.style.display = 'none'; return; }
+      items.forEach((txt, idx)=>{
+        const div = document.createElement('div');
+        div.className = 'ac-item' + (idx===0?' active':'');
+        if (idx===0) acIndex = 0;
+        div.textContent = txt;
+        div.addEventListener('mousedown', (e)=>{ e.preventDefault(); acceptAC(txt); });
+        acList.appendChild(div);
+      });
+      acList.style.display = 'block';
+    }
+    function hideAC(){ acList.style.display = 'none'; acIndex = -1; }
+
+    function acceptAC(txt){
+      const cur = cmdEl.value.trim();
+      const parts = cur.split(/\s+/);
+      let rest = '';
+      if (parts.length >= 2){
+        if (/^https?:\/\//i.test(parts[1])) rest = ' ' + parts.slice(1).join(' ');
+        else if (parts.length > 2) rest = ' ' + parts.slice(2).join(' ');
+      }
+      const suffix = (txt === 'help' || rest) ? '' : ' ';
+      cmdEl.value = txt + rest + suffix;
+      hideAC();
+      cmdEl.focus();
+    }
+
+    function moveAC(delta){
+      const items = Array.from(acList.querySelectorAll('.ac-item'));
+      if (!items.length) return;
+      acIndex = (acIndex + delta + items.length) % items.length;
+      items.forEach((el,i)=> el.classList.toggle('active', i===acIndex));
+    }
+    function activeACText(){
+      const el = acList.querySelector('.ac-item.active');
+      return el ? el.textContent : null;
+    }
+
+    cmdEl.addEventListener('input', ()=>{
+      const val = cmdEl.value.trim().toLowerCase();
+      if (!val){ hideAC(); return; }
+      const matches = COMMANDS.filter(c => c.startsWith(val));
+      if (!matches.length){
+        const first = val.split(/\s+/).slice(0,2).join(' ');
+        const alt = COMMANDS.filter(c => c.startsWith(first));
+        showAC(alt);
+      } else {
+        showAC(matches);
+      }
     });
 
-    // Autocomplete theo tiền tố toàn chuỗi
-    cmdEl.addEventListener('keydown', (e) => {
-      if (e.key === 'Tab') {
-        e.preventDefault();
-        const val = cmdEl.value.trim();
-        const lower = val.toLowerCase();
-        const matched = COMMANDS.filter(c => c.startsWith(lower));
-        if (matched.length === 1) {
-          const rest = val.slice(lower.length);
-          cmdEl.value = matched[0] + rest;
-        } else if (matched.length > 1) {
-          matched.sort((a,b)=>a.length-b.length);
-          const rest = val.slice(lower.length);
-          cmdEl.value = matched[0] + rest;
+    // Chỉ Tab để nhận gợi ý; Enter dùng để chạy lệnh
+    cmdEl.addEventListener('keydown', (e)=>{
+      if (acList.style.display === 'block'){
+        if (e.key === 'ArrowDown'){ e.preventDefault(); moveAC(1); }
+        else if (e.key === 'ArrowUp'){ e.preventDefault(); moveAC(-1); }
+        else if (e.key === 'Tab'){
+          const t = activeACText();
+          if (t){ e.preventDefault(); acceptAC(t); }
+        } else if (e.key === 'Escape'){
+          hideAC();
+        } else if (e.key === 'Enter'){
+          e.preventDefault();
+          runBtn.click(); // chạy lệnh, không autocomplete
+        }
+      } else {
+        if (e.key === 'Tab'){
+          const val = cmdEl.value.trim().toLowerCase();
+          const m = COMMANDS.filter(c=>c.startsWith(val));
+          if (m.length){ e.preventDefault(); acceptAC(m[0]); }
+        } else if (e.key === 'Enter'){
+          e.preventDefault();
+          runBtn.click(); // chạy lệnh khi không mở dropdown
         }
       }
     });
 
-    // UI helpers
+    document.addEventListener('click', (e)=>{
+      if (!acList.contains(e.target) && e.target !== cmdEl) hideAC();
+    });
+
+    /* ===== Helpers ===== */
     function appendLog(msg, css='') {
       const line = document.createElement('div');
       if (css) line.className = css;
@@ -157,16 +244,12 @@
       logsEl.scrollTop = logsEl.scrollHeight;
     }
     function setStatus(msg){ statusEl.textContent = msg; }
-
-    // Trích ID từ log (pattern: "ID: <...>")
     function extractIdsFromLog(text) {
       const ids = new Set();
       const re = /\bID\s*:\s*([A-Za-z0-9._\-]+)/ig;
-      let m;
-      while ((m = re.exec(text)) !== null) ids.add(m[1]);
+      let m; while ((m = re.exec(text)) !== null) ids.add(m[1]);
       return Array.from(ids);
     }
-
     async function callJSON(url, body) {
       const res = await fetch(url, {
         method: 'POST',
@@ -180,14 +263,9 @@
       return res.json();
     }
 
-    // Lưu job gần nhất: để xóa dòng lỗi và tải file
-    let lastJob = { data_dir: null, log_text: "" };
-
-    // Chạy lệnh
+    /* ===== Run / Delete flow ===== */
     runBtn.addEventListener('click', async () => {
-      const backend = backendEl.value.trim().replace(/\/+$/,'');
       const command = cmdEl.value.trim();
-      if (!backend) { alert('Nhập BACKEND_URL'); return; }
       if (!command) { alert('Nhập lệnh'); return; }
 
       runBtn.disabled = true; deleteBtn.disabled = true;
@@ -195,13 +273,13 @@
       logsEl.innerHTML = '';
 
       try {
-        const start = await callJSON(`${backend}/api/run-tool`, { command });
+        const start = await callJSON(api('/run-tool'), { command });
         const jobId = start.job_id;
         appendLog(`🔎 Job: ${jobId}`);
 
         let done = false, dataDir = null, resultText = '';
         while (!done) {
-          const j = await fetch(`${backend}/api/job/${jobId}`).then(r=>r.json());
+          const j = await fetch(api(`/job/${jobId}`)).then(r=>r.json());
           if (j.status === 'done') {
             done = true;
             const r = j.result || {};
@@ -236,23 +314,18 @@
       }
     });
 
-    // Xóa log
     clearBtn.addEventListener('click', () => {
       logsEl.innerHTML = '';
       setStatus('Đã xóa log.');
       deleteBtn.disabled = true;
     });
 
-    // Xóa dòng lỗi dựa trên log + tự tải file đã chỉnh sửa
     deleteBtn.addEventListener('click', async () => {
-      const backend = backendEl.value.trim().replace(/\/+$/,'');
-      if (!backend) { alert('Nhập BACKEND_URL'); return; }
       if (!lastJob.data_dir) { alert('Chưa có data_dir. Hãy chạy tool trước.'); return; }
       if (!lastJob.log_text) { alert('Chưa có log để trích ID.'); return; }
 
       try {
-        // Dry-run để người dùng xác nhận
-        const dry = await callJSON(`${backend}/api/delete-error-lines`, {
+        const dry = await callJSON(api('/delete-error-lines'), {
           data_dir: lastJob.data_dir,
           log_text: lastJob.log_text,
           dry_run: true
@@ -263,8 +336,7 @@
         const ok = confirm(`Sẽ xóa các dòng chứa ${idsCount} ID trong ${files.length} file:\n- ${files.join('\n- ')}\n\nBạn chắc chắn?`);
         if (!ok) return;
 
-        // Xóa thật
-        const res = await callJSON(`${backend}/api/delete-error-lines`, {
+        const res = await callJSON(api('/delete-error-lines'), {
           data_dir: lastJob.data_dir,
           log_text: lastJob.log_text,
           dry_run: false
@@ -275,13 +347,12 @@
           else appendLog(`• ${r.file}: removed ${r.removed}, kept ${r.kept}`);
         });
 
-        // Tự động tải file đã chỉnh sửa
         const modified = res.modified_files || [];
         if (modified.length === 1) {
-          const url = `${backend}/api/download-cleaned-one?data_dir=${encodeURIComponent(lastJob.data_dir)}&name=${encodeURIComponent(modified[0])}`;
+          const url = api(`/download-cleaned-one?data_dir=${encodeURIComponent(lastJob.data_dir)}&name=${encodeURIComponent(modified[0])}`);
           window.open(url, "_blank");
         } else if (modified.length > 1) {
-          const url = `${backend}/api/download-cleaned?data_dir=${encodeURIComponent(lastJob.data_dir)}&names=${encodeURIComponent(modified.join(","))}`;
+          const url = api(`/download-cleaned?data_dir=${encodeURIComponent(lastJob.data_dir)}&names=${encodeURIComponent(modified.join(","))}`);
           window.open(url, "_blank");
         } else {
           appendLog('ℹ️ Không có file nào thay đổi (có thể không line nào khớp ID).', 'muted');
@@ -291,16 +362,14 @@
       }
     });
 
-    // Phân tích link (probe quyền chia sẻ + test tải nhanh)
+    /* Phân tích link */
     probeBtn.addEventListener('click', async () => {
-      const backend = backendEl.value.trim().replace(/\/+$/,'');
       const url = probeUrlEl.value.trim();
-      if (!backend) { alert('Nhập BACKEND_URL'); return; }
       if (!url) { alert('Nhập link cần phân tích'); return; }
       probeBtn.disabled = true;
       probeResult.textContent = 'Đang phân tích...';
       try {
-        const res = await callJSON(`${backend}/api/analyze-by-url`, { url });
+        const res = await callJSON(api('/analyze-by-url'), { url });
         const vis = res.visibility || {};
         const ok = res.ok;
         const lines = [];
@@ -325,14 +394,16 @@
       }
     });
 
-    // Gợi ý nhanh bằng click vào pill
+    /* Click gợi ý nhanh */
     document.querySelectorAll('.pill').forEach(p => {
       p.addEventListener('click', () => {
         const cmd = p.textContent.trim();
         const cur = cmdEl.value.trim();
         if (!cur || !cur.startsWith(cmd)) {
-          cmdEl.value = cmd + (cur ? (' ' + cur) : ' ');
+          cmdEl.value = cmd + (cmd === 'help' ? '' : ' ');
           cmdEl.focus();
+          const ev = new Event('input');
+          cmdEl.dispatchEvent(ev);
         }
       });
     });
