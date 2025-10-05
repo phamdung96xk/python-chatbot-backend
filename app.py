@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
 
-# boto3 là tùy chọn (chỉ tạo client nếu có S3_BUCKET)
+# boto3 là tùy chọn (S3 presign)
 try:
     import boto3  # type: ignore
 except Exception:
@@ -120,36 +120,65 @@ def _download_zip_to_file(url: str, dest_path: str):
     if not zipfile.is_zipfile(dest_path):
         raise ValueError("Nội dung tải về không phải file ZIP.")
 
-# ===== Case-insensitive XML detection =====
-XML_PATTERNS = ["*.xml", "*.[xX][mM][lL]"]  # .xml, .XML, .Xml, ...
+# ====== Canonical data dir (áp dụng cho mọi tool) ======
+XML_PATTERNS = ["*.xml", "*.[xX][mM][lL]"]
+TXT_PATTERNS = ["*_content.txt", "*_CONTENT.TXT", "*_Content.txt"]
 
-def _has_xml(dirpath: str) -> bool:
-    for pat in XML_PATTERNS:
-        if glob.glob(os.path.join(dirpath, pat)):
-            return True
-    return False
-
-def _detect_best_data_dir(root_dir: str) -> str:
-    """Chọn thư mục chạy tool:
-       - Nếu có .xml ngay trong root_dir -> dùng root_dir
-       - Nếu nằm ở thư mục con -> trỏ tới thư mục chứa .xml đầu tiên
-    """
+def _has_data(dirpath: str) -> bool:
     try:
-        if _has_xml(root_dir):
-            return root_dir
-        for pat in XML_PATTERNS:
-            deep = glob.glob(os.path.join(root_dir, "**", pat), recursive=True)
-            if deep:
-                return os.path.dirname(deep[0])
+        for pat in XML_PATTERNS + TXT_PATTERNS:
+            if glob.glob(os.path.join(dirpath, pat)):
+                return True
     except Exception:
         pass
+    return False
+
+def _single_child_dir(dirpath: str):
+    try:
+        names = [n for n in os.listdir(dirpath) if os.path.isdir(os.path.join(dirpath, n))]
+        if len(names) == 1:
+            return os.path.join(dirpath, names[0])
+    except Exception:
+        pass
+    return None
+
+def _first_data_dir_recursive(root_dir: str):
+    try:
+        for cur, dirs, files in os.walk(root_dir):
+            if _has_data(cur):
+                return cur
+    except Exception:
+        pass
+    return None
+
+def _canonical_data_dir(root_dir: str) -> str:
+    """
+    1) Nếu root_dir có *.xml hoặc *_content.txt -> dùng root_dir
+    2) Nếu có thư mục 'Test/' và trong đó có dữ liệu -> dùng Test/
+    3) Nếu root_dir chỉ có 1 thư mục con -> chui vào rồi kiểm tra lại
+    4) Quét đệ quy: lấy thư mục đầu tiên có dữ liệu
+    5) Không tìm thấy -> trả về root_dir (để module báo lỗi rõ ràng)
+    """
+    root_dir = os.path.abspath(root_dir)
+    if _has_data(root_dir):
+        return root_dir
+    test_dir = os.path.join(root_dir, "Test")
+    if os.path.isdir(test_dir) and _has_data(test_dir):
+        return test_dir
+    child = _single_child_dir(root_dir)
+    if child:
+        test2 = os.path.join(child, "Test")
+        if os.path.isdir(test2) and _has_data(test2):
+            return test2
+        if _has_data(child):
+            return child
+    found = _first_data_dir_recursive(root_dir)
+    if found:
+        return found
     return root_dir
 
-# ===== Drive visibility probe =====
+# ===== Drive visibility probe (tham khảo) =====
 def _probe_drive_visibility(url: str):
-    """Kiểm tra nhanh link Drive có public không (Anyone with the link).
-       Trả về: {"public": bool, "reason": str, "normalized_url": str}
-    """
     norm = _normalize_gdrive(url)
     try:
         with requests.Session() as s:
@@ -175,7 +204,7 @@ def _probe_drive_visibility(url: str):
                     pass
 
             if "attachment" in cdisp:
-                return {"public": True, "reason": "Có header tải xuống (Content-Disposition)", "normalized_url": norm}
+                return {"public": True, "reason": "Có header tải xuống", "normalized_url": norm}
 
             try:
                 r2 = s.get(norm, headers={"Range": "bytes=0-8"}, stream=True,
@@ -186,7 +215,7 @@ def _probe_drive_visibility(url: str):
             except Exception:
                 pass
 
-            return {"public": True, "reason": "Truy cập được (không thấy dấu hiệu chặn)", "normalized_url": norm}
+            return {"public": True, "reason": "Truy cập được", "normalized_url": norm}
     except Exception as e:
         return {"public": False, "reason": f"Lỗi probe: {type(e).__name__}: {e}", "normalized_url": norm}
 
@@ -252,10 +281,8 @@ def analyze_by_url():
 
 # ===== Dispatcher =====
 TOOL_KEYWORDS = [
-    # "new" trước để không bị nuốt bởi pattern thường
     (r"\bcivitek\s+new\b", "civitek_new_logic"),
     (r"\bmd\s+new\b",      "md_new_logic"),
-
     (r"\bcivitek\b",       "civitek_logic"),
     (r"\bflager\b",        "flager_logic"),
     (r"\bmi\b",            "mi_logic"),
@@ -263,19 +290,20 @@ TOOL_KEYWORDS = [
 ]
 
 HELP_TEXT = (
-    'Tool "civitek_logic.py" từ khóa "civitek" (viết hoa viết thường đều được), '
-    '"flager_logic.py" từ khóa "flager" (viết hoa viết thường đều được), '
-    '"mi_logic.py" từ khóa "mi" (viết hoa viết thường đều được), '
-    '"md_logic.py" từ khóa "md" (viết hoa viết thường đều được), '
-    '"md_new_logic" từ khóa "md new" (viết hoa viết thường đều được), '
+    'Tool "civitek_logic.py" từ khóa "civitek", '
+    '"flager_logic.py" từ khóa "flager", '
+    '"mi_logic.py" từ khóa "mi", '
+    '"md_logic.py" từ khóa "md", '
+    '"md_new_logic" từ khóa "md new", '
     '"civitek_new_logic.py" từ khóa "civitek new". '
-    'Hướng dẫn sử dụng thì ghi như nội dung tôi vừa gửi bạn đây từ khóa "help".'
+    'Gõ "help" để xem hướng dẫn.'
 )
 
 def _call_tool_module(module_name: str, command: str):
     """Quy trình:
        1) run/main/handle (có tham số hoặc không)
-       1.5) Có URL (url=... hoặc URL trần): tải ZIP (stream), giải nén, gắn path=... (best dir)
+       1.5) Có URL (url=... hoặc URL trần): tải ZIP (stream), giải nén
+           -> xác định thư mục dữ liệu hợp lệ (canonical) và CHỈ gắn path=... nếu lệnh chưa có.
        2) Fallback: run_*_check(directory_path)
     """
     try:
@@ -295,7 +323,7 @@ def _call_tool_module(module_name: str, command: str):
                 return {"ok": False, "module": module_name, "fn": fn_name,
                         "error": f"Lỗi khi gọi {module_name}.{fn_name}: {type(e).__name__}: {e}"}
 
-    # B1.5: nhận URL (url=... hoặc URL trần) -> tải ZIP xuống file, extract, gắn path=...
+    # B1.5: nhận URL -> tải & giải nén -> gắn path nếu chưa có
     murl = re.search(r"url\s*=\s*([^\s]+)", command, flags=re.I)
     if not murl:
         murl = re.search(r"(https?://\S+)", command, flags=re.I)
@@ -303,12 +331,13 @@ def _call_tool_module(module_name: str, command: str):
         url_in = murl.group(1)
         try:
             tmp_zip = os.path.join(UPLOAD_DIR, f"link_{uuid.uuid4().hex}.zip")
-            _download_zip_to_file(url_in, tmp_zip)  # streaming to disk
+            _download_zip_to_file(url_in, tmp_zip)
             extract_dir = tempfile.mkdtemp(prefix="gd_", dir=UPLOAD_DIR)
             with zipfile.ZipFile(tmp_zip, "r") as z:
                 z.extractall(extract_dir)
-            best_dir = _detect_best_data_dir(extract_dir)
-            command = f"{command} path={best_dir}"
+            best_dir = _canonical_data_dir(extract_dir)
+            if not re.search(r"\bpath\s*=", command, flags=re.I):
+                command = f"{command} path={best_dir}"
         except Exception as e:
             return {"ok": False, "error": f"Tải/Giải nén từ URL lỗi: {type(e).__name__}: {e}"}
 
@@ -318,9 +347,8 @@ def _call_tool_module(module_name: str, command: str):
         "civitek_logic":     "run_civitek_check",
         "flager_logic":      "run_flager_check",
         "mi_logic":          "run_mi_check",
-        # ==== cập nhật map cho md* theo tên hàm hiện có ====
-        "md_logic":          "run_md_cu_check",
-        "md_new_logic":      "run_md_moi_check",
+        "md_logic":          "run_md_cu_check",     # map tên hiện có
+        "md_new_logic":      "run_md_moi_check",    # map tên hiện có
     }
     check_fn_name = name_map.get(module_name)
     if check_fn_name and hasattr(mod, check_fn_name):
@@ -328,7 +356,7 @@ def _call_tool_module(module_name: str, command: str):
         try:
             m = re.search(r"path\s*=\s*([^\s]+)", command, flags=re.I)
             raw_dir = m.group(1) if m else UPLOAD_DIR
-            data_dir = _detect_best_data_dir(raw_dir)
+            data_dir = _canonical_data_dir(raw_dir)
             out = check_fn(data_dir)
             return {"ok": True, "module": module_name, "fn": check_fn_name,
                     "output": out, "data_dir": data_dir}
@@ -349,7 +377,7 @@ def route_command(command: str):
             return _call_tool_module(module_name, command)
     return {"ok": False, "error": "Không nhận dạng được tool từ lệnh. Gõ 'help' để xem hướng dẫn."}
 
-# ===== /api/run-tool — luôn chạy ASYNC cho mọi lệnh =====
+# ===== /api/run-tool — chạy ASYNC cho mọi lệnh =====
 @app.route("/api/run-tool", methods=["POST"])
 def run_tool():
     data = request.get_json(silent=True) or {}
@@ -364,7 +392,7 @@ def run_tool():
     t.start()
     return jsonify({"job_id": job_id, "status": "queued"}), 202
 
-# ===== /api/run-tool-async (ép nền cho mọi lệnh) =====
+# ===== /api/run-tool-async (alias) =====
 @app.route("/api/run-tool-async", methods=["POST"])
 def run_tool_async():
     data = request.get_json(silent=True) or {}
