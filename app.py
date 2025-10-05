@@ -91,7 +91,7 @@ def _normalize_gdrive(url: str) -> str:
 def _download_zip_to_file(url: str, dest_path: str):
     """
     Tải ZIP (Drive/URL thường) xuống file trực tiếp (streaming), tiết kiệm RAM.
-    Cuối cùng verify dest_path là ZIP hợp lệ, nếu không -> raise.
+    Xác thực cuối: dest_path phải là ZIP hợp lệ.
     """
     is_drive = "drive.google.com" in url
     if is_drive:
@@ -160,7 +160,7 @@ def _canonical_data_dir(root_dir: str) -> str:
     5) Không tìm thấy -> trả về root_dir (để module báo lỗi rõ ràng)
     """
     root_dir = os.path.abspath(root_dir)
-    if _has_data(root_dir):
+    if os.path.isdir(root_dir) and _has_data(root_dir):
         return root_dir
     test_dir = os.path.join(root_dir, "Test")
     if os.path.isdir(test_dir) and _has_data(test_dir):
@@ -303,7 +303,7 @@ def _call_tool_module(module_name: str, command: str):
     """Quy trình:
        1) run/main/handle (có tham số hoặc không)
        1.5) Có URL (url=... hoặc URL trần): tải ZIP (stream), giải nén
-           -> xác định thư mục dữ liệu hợp lệ (canonical) và CHỈ gắn path=... nếu lệnh chưa có.
+           -> xác định thư mục dữ liệu hợp lệ và CHỈ gắn path=... nếu lệnh chưa có.
        2) Fallback: run_*_check(directory_path)
     """
     try:
@@ -347,8 +347,8 @@ def _call_tool_module(module_name: str, command: str):
         "civitek_logic":     "run_civitek_check",
         "flager_logic":      "run_flager_check",
         "mi_logic":          "run_mi_check",
-        "md_logic":          "run_md_cu_check",     # map tên hiện có
-        "md_new_logic":      "run_md_moi_check",    # map tên hiện có
+        "md_logic":          "run_md_cu_check",
+        "md_new_logic":      "run_md_moi_check",
     }
     check_fn_name = name_map.get(module_name)
     if check_fn_name and hasattr(mod, check_fn_name):
@@ -357,6 +357,18 @@ def _call_tool_module(module_name: str, command: str):
             m = re.search(r"path\s*=\s*([^\s]+)", command, flags=re.I)
             raw_dir = m.group(1) if m else UPLOAD_DIR
             data_dir = _canonical_data_dir(raw_dir)
+
+            # Nếu sau chuẩn hoá mà vẫn không tồn tại, thử lùi về cha và chuẩn hoá lại
+            if not os.path.isdir(data_dir):
+                parent = os.path.dirname(data_dir)
+                if os.path.isdir(parent):
+                    data_dir = _canonical_data_dir(parent)
+
+            if not os.path.isdir(data_dir):
+                return {"ok": False, "module": module_name, "fn": check_fn_name,
+                        "error": (f"Thư mục dữ liệu không tồn tại: '{raw_dir}'. "
+                                  f"Hãy bỏ 'path=' để backend tự chọn, hoặc chỉ định đúng thư mục đã giải nén.")}
+
             out = check_fn(data_dir)
             return {"ok": True, "module": module_name, "fn": check_fn_name,
                     "output": out, "data_dir": data_dir}
