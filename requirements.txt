@@ -1,8 +1,9 @@
-Flask
-Flask-Cors
+flask
+flask-cors
 gunicorn
+requests
+boto3
 beautifulsoup4
 lxml
 openpyxl
 pandas
-requests
