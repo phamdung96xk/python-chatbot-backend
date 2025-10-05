@@ -1,5 +1,5 @@
 # app.py
-import os, io, zipfile, tempfile, time, uuid, re, glob, shutil, importlib
+import os, io, zipfile, tempfile, time, uuid, re, glob, shutil, importlib, inspect
 import boto3, requests
 from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
@@ -26,10 +26,7 @@ def analyze_zip_stream(body_bytes: bytes) -> dict:
     try:
         zf = zipfile.ZipFile(io.BytesIO(body_bytes))
         names = zf.namelist()
-        summary = {
-            "num_entries_in_zip": len(names),
-            "sample_first_10": names[:10]
-        }
+        summary = {"num_entries_in_zip": len(names), "sample_first_10": names[:10]}
         # (TODO) GỌI TOOL THẬT Ở ĐÂY nếu bạn muốn: giải nén -> gọi checker của bạn
         return {"ok": True, "elapsed_sec": round(time.time()-t0, 3), "summary": summary}
     except Exception as e:
@@ -42,11 +39,8 @@ def analyze_zip_file(zip_path: str) -> dict:
             z.extractall(UPLOAD_DIR)  # hoặc temp dir riêng nếu muốn dọn dẹp sau
             names = z.namelist()
         # (TODO) GỌI TOOL THẬT ở đây, ví dụ check folder đã extract
-        return {
-            "ok": True,
-            "elapsed_sec": round(time.time()-t0, 3),
-            "summary": {"entries": len(names), "sample": names[:10]}
-        }
+        return {"ok": True, "elapsed_sec": round(time.time()-t0, 3),
+                "summary": {"entries": len(names), "sample": names[:10]}}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
@@ -141,21 +135,50 @@ HELP_TEXT = (
 )
 
 def _call_tool_module(module_name: str, command: str):
+    """Gọi module theo 2 bước:
+       1) run/main/handle (có tham số hoặc không)
+       2) Fallback sang run_*_check(directory_path) đang có trong các module logic
+    """
     try:
         mod = importlib.import_module(module_name)
     except Exception as e:
         return {"ok": False, "error": f"Không import được module '{module_name}': {e}"}
 
+    # --- B1: thử run/main/handle ---
     for fn_name in ("run", "main", "handle"):
         fn = getattr(mod, fn_name, None)
         if callable(fn):
             try:
-                out = fn(command)
+                sig = inspect.signature(fn)
+                out = fn(command) if len(sig.parameters) >= 1 else fn()
                 return {"ok": True, "module": module_name, "fn": fn_name, "output": out}
             except Exception as e:
                 return {"ok": False, "module": module_name, "fn": fn_name,
-                        "error": f"Lỗi khi gọi {module_name}.{fn_name}(...): {type(e).__name__}: {e}"}
-    return {"ok": False, "error": f"Module '{module_name}' không có hàm run/main/handle nhận chuỗi lệnh."}
+                        "error": f"Lỗi khi gọi {module_name}.{fn_name}: {type(e).__name__}: {e}"}
+
+    # --- B2: fallback sang run_*_check(dir) ---
+    name_map = {
+        "civitek_new_logic": "run_civitek_new_check",
+        "civitek_logic":     "run_civitek_check",
+        "flager_logic":      "run_flager_check",
+        "mi_logic":          "run_mi_check",
+        "md_logic":          "run_md_check",
+    }
+    check_fn_name = name_map.get(module_name)
+    if check_fn_name and hasattr(mod, check_fn_name):
+        check_fn = getattr(mod, check_fn_name)
+        try:
+            # lấy thư mục dữ liệu từ lệnh: ví dụ "mi path=/tmp/uploads/batch_01"
+            m = re.search(r"path\s*=\s*([^\s]+)", command, flags=re.I)
+            data_dir = m.group(1) if m else UPLOAD_DIR
+            out = check_fn(data_dir)
+            return {"ok": True, "module": module_name, "fn": check_fn_name,
+                    "output": out, "data_dir": data_dir}
+        except Exception as e:
+            return {"ok": False, "module": module_name, "fn": check_fn_name,
+                    "error": f"Lỗi khi gọi {module_name}.{check_fn_name}: {type(e).__name__}: {e}"}
+
+    return {"ok": False, "error": f"Module '{module_name}' không có entry phù hợp (run/main/handle hay run_*_check)."}
 
 def route_command(command: str):
     """Xác định module theo keyword và gọi module tương ứng."""
@@ -189,8 +212,12 @@ def run_tool():
     if result.get("ok"):
         if result.get("help"):
             return jsonify({"result": result.get("message")})
-        # nếu module trả output dạng dict/string, cứ chuyển thẳng
-        return jsonify({"result": result.get("output"), "module": result.get("module"), "fn": result.get("fn")})
+        return jsonify({
+            "result": result.get("output"),
+            "module": result.get("module"),
+            "fn": result.get("fn"),
+            "data_dir": result.get("data_dir")
+        })
     else:
         return jsonify({"result": result.get("error")})
 
