@@ -4,10 +4,43 @@ import base64
 import gzip
 import xml.etree.ElementTree as ET
 
+# ==== Helper chọn thư mục dữ liệu “đúng” (dùng chung) ====
+def _has_data_here(d):
+    try:
+        for f in os.listdir(d):
+            fl = f.lower()
+            if fl.endswith(".xml") or fl.endswith("_content.txt"):
+                return True
+    except Exception:
+        pass
+    return False
+
+def resolve_data_dir(base_dir: str) -> str:
+    base_dir = os.path.abspath(base_dir)
+    if os.path.isdir(base_dir) and _has_data_here(base_dir):
+        return base_dir
+    test_dir = os.path.join(base_dir, "Test")
+    if os.path.isdir(test_dir) and _has_data_here(test_dir):
+        return test_dir
+    try:
+        subs = [n for n in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, n))]
+        if len(subs) == 1:
+            child = os.path.join(base_dir, subs[0])
+            if _has_data_here(child):
+                return child
+            test2 = os.path.join(child, "Test")
+            if os.path.isdir(test2) and _has_data_here(test2):
+                return test2
+    except Exception:
+        pass
+    for cur, dirs, files in os.walk(base_dir):
+        for f in files:
+            fl = f.lower()
+            if fl.endswith(".xml") or fl.endswith("_content.txt"):
+                return cur
+    return base_dir
+
 def decode_base64_gzip(encoded_string):
-    """
-    Decodes a base64 encoded, gzipped string.
-    """
     try:
         missing_padding = len(encoded_string) % 4
         if missing_padding:
@@ -19,9 +52,6 @@ def decode_base64_gzip(encoded_string):
         raise ValueError(f"Lỗi giải mã/giải nén: {e}")
 
 def decode_nested_txt_line(line_content):
-    """
-    Decodes a single line from the _content.txt file which contains nested base64 content.
-    """
     uuid, html_content, error_msg = None, None, None
     parts = line_content.split('|')
     if len(parts) >= 3:
@@ -41,9 +71,6 @@ def decode_nested_txt_line(line_content):
     return uuid, html_content, error_msg
 
 def parse_xml_for_case_keys(xml_file_path):
-    """
-    Parses the XML file to extract a map of Lead ID to CaseKey.
-    """
     case_key_map = {}
     try:
         tree = ET.parse(xml_file_path)
@@ -61,16 +88,16 @@ def run_md_cu_check(directory_path):
     """
     Main function to run the 'MD Cũ' check logic for all files in a directory.
     """
+    data_dir = resolve_data_dir(directory_path)  # <-- CHUẨN HOÁ
     log_output = []
-    xml_files = [f for f in os.listdir(directory_path) if f.lower().endswith(".xml")]
-    
+    xml_files = [f for f in os.listdir(data_dir) if f.lower().endswith(".xml")]
     if not xml_files:
         return "Không tìm thấy tệp .xml nào trong thư mục được cung cấp."
 
     for xml_file in xml_files:
         base_name = os.path.splitext(xml_file)[0]
-        txt_path = os.path.join(directory_path, f"{base_name}_content.txt")
-        xml_path = os.path.join(directory_path, xml_file)
+        txt_path = os.path.join(data_dir, f"{base_name}_content.txt")
+        xml_path = os.path.join(data_dir, xml_file)
 
         log_output.append(f"\n--- Đang xử lý (MD Cũ): {base_name} ---")
 
@@ -99,7 +126,6 @@ def run_md_cu_check(directory_path):
         file_errors = []
         for xml_id, case_key in xml_case_keys.items():
             html_content, error = txt_data.get(xml_id, (None, "Không tìm thấy ID trong file TXT"))
-            
             if error:
                 file_errors.append(f"ID: {xml_id} | CaseKey_XML: {case_key} | Lỗi: {error}")
                 continue
@@ -107,19 +133,16 @@ def run_md_cu_check(directory_path):
                 file_errors.append(f"ID: {xml_id} | CaseKey_XML: {case_key} | Lỗi: Nội dung HTML rỗng sau khi giải mã.")
                 continue
 
-            DATA_NOT_FOUND_CRITERIA = "DATA NOT FOUND".lower()
-            if DATA_NOT_FOUND_CRITERIA in html_content.lower():
+            if "data not found" in html_content.lower():
                 match = re.search(r"<input[^>]*name=\"caseId\"[^>]*value=\"([^\"]*)\"[^>]*>", html_content, re.I)
                 html_val_raw = match.group(1).strip().upper() if match else None
                 html_val_normalized = html_val_raw.replace('-', '') if html_val_raw else None
-                
                 if not match or case_key.upper() != html_val_normalized:
                     file_errors.append(f"ID: {xml_id} | CaseKey_XML: {case_key} | CaseName_HTML: {html_val_raw or 'Không tìm thấy'}")
             else:
                 match = re.search(r"Case Number:\s*</span>\s*</td>\s*<td>\s*<span[^>]*class=\"Value\"[^>]*>([A-Za-z0-9.-]+?)</span>", html_content, re.I | re.DOTALL)
                 html_val_raw = match.group(1).strip().upper() if match else None
                 html_val_normalized = html_val_raw.replace('-', '') if html_val_raw else None
-
                 if not match or case_key.upper() != html_val_normalized:
                     file_errors.append(f"ID: {xml_id} | CaseKey_XML: {case_key} | CaseName_HTML: {html_val_raw or 'Không tìm thấy'}")
 
@@ -130,4 +153,3 @@ def run_md_cu_check(directory_path):
                 log_output.append(f"  ❌ {err}")
 
     return "\n".join(log_output)
-

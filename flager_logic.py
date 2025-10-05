@@ -1,4 +1,3 @@
-# flager_logic.py
 # File này chứa TOÀN BỘ logic xử lý của tool Flager, KHÔNG chứa code giao diện (tkinter).
 
 import os
@@ -11,8 +10,43 @@ import html
 from bs4 import BeautifulSoup
 from collections import defaultdict
 
-# --- CÁC HÀM XỬ LÝ CỐT LÕI (di chuyển từ file gốc) ---
+# ==== Helper chọn thư mục dữ liệu “đúng” (dùng chung) ====
+def _has_data_here(d):
+    try:
+        for f in os.listdir(d):
+            fl = f.lower()
+            if fl.endswith(".xml") or fl.endswith("_content.txt"):
+                return True
+    except Exception:
+        pass
+    return False
 
+def resolve_data_dir(base_dir: str) -> str:
+    base_dir = os.path.abspath(base_dir)
+    if os.path.isdir(base_dir) and _has_data_here(base_dir):
+        return base_dir
+    test_dir = os.path.join(base_dir, "Test")
+    if os.path.isdir(test_dir) and _has_data_here(test_dir):
+        return test_dir
+    try:
+        subs = [n for n in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, n))]
+        if len(subs) == 1:
+            child = os.path.join(base_dir, subs[0])
+            if _has_data_here(child):
+                return child
+            test2 = os.path.join(child, "Test")
+            if os.path.isdir(test2) and _has_data_here(test2):
+                return test2
+    except Exception:
+        pass
+    for cur, dirs, files in os.walk(base_dir):
+        for f in files:
+            fl = f.lower()
+            if fl.endswith(".xml") or fl.endswith("_content.txt"):
+                return cur
+    return base_dir
+
+# --- CÁC HÀM XỬ LÝ CỐT LÕI (di chuyển từ file gốc) ---
 def decode_base64_gzip(data):
     try:
         if len(data) % 4: data += '=' * (4 - len(data) % 4)
@@ -44,7 +78,6 @@ def load_xml_case_keys(xml_path):
             case_id, case_key = lead.get('ID'), lead.get('CaseKey')
             if case_id and case_key: case_key_map[case_id] = case_key.strip()
     except Exception as e: 
-        # Thay vì in ra console, ta trả về lỗi để hàm chính xử lý
         raise IOError(f"Lỗi khi đọc tệp XML {os.path.basename(xml_path)}: {e}")
     return case_key_map
 
@@ -88,29 +121,21 @@ def validate_cases_found_page(html_content, expected_case_key):
     return 'VALID', None
 
 def process_file_pair_logic(file_pair, results_log):
-    """
-    Hàm xử lý logic cho một cặp file, trả kết quả qua list `results_log`.
-    """
     xml_file, content_file = file_pair
     xml_filename = os.path.basename(xml_file)
     results_log.append(f"\n--- Đang xử lý: {xml_filename} ---")
-    
     case_key_map = load_xml_case_keys(xml_file)
     html_in_memory = {}
     hard_error_uuids = set()
     errors_for_this_file = []
-
     try:
         with open(content_file, 'r', encoding='utf-8') as f:
             lines = f.readlines()
-        
-        # Giai đoạn 1: Kiểm tra nội dung HTML
         for line in lines:
             uuid, html_content = decode_nested_base64(line)
             if not uuid: continue
             html_in_memory[uuid] = html_content
             case_key = case_key_map.get(uuid, "")
-
             if check_for_cases_found(html_content):
                 status, payload = validate_cases_found_page(html_content, case_key)
                 if status == 'ERROR_CASEKEY':
@@ -128,47 +153,38 @@ def process_file_pair_logic(file_pair, results_log):
                 if not is_valid:
                     errors_for_this_file.append(f"ID:{uuid}| {message}")
                     hard_error_uuids.add(uuid)
-        
         results_log.extend(errors_for_this_file)
-
     except Exception as e:
         results_log.append(f"Lỗi nghiêm trọng khi xử lý {xml_filename}: {e}")
 
 def run_flager_check(directory_path):
     """
     Hàm chính để chạy toàn bộ logic kiểm tra cho tool Flager từ server.
-    Nhận vào đường dẫn thư mục và trả về một chuỗi kết quả.
     """
-    results_log = [] # List để lưu lại mọi thông báo
+    data_dir = resolve_data_dir(directory_path)  # <-- CHUẨN HOÁ
+    results_log = []
     results_log.append("--- Bắt đầu quá trình quét file cho tool Flager ---")
-
     try:
-        content_files = [f for f in os.listdir(directory_path) if f.endswith("_content.txt")]
+        content_files = [f for f in os.listdir(data_dir) if f.endswith("_content.txt")]
         file_pairs = []
         for content_filename in content_files:
             base_name = content_filename.replace('_content.txt', '')
             xml_filename = base_name + '.xml'
-            xml_path = os.path.join(directory_path, xml_filename)
+            xml_path = os.path.join(data_dir, xml_filename)
             if os.path.exists(xml_path):
-                file_pairs.append((xml_path, os.path.join(directory_path, content_filename)))
+                file_pairs.append((xml_path, os.path.join(data_dir, content_filename)))
             else:
                 results_log.append(f"Cảnh báo: Tìm thấy {content_filename} nhưng không có file {xml_filename} tương ứng.")
-        
         if not file_pairs:
             return "Lỗi: Không tìm thấy cặp file `_content.txt` và `.xml` hợp lệ nào."
-
         results_log.append(f"Đã phát hiện {len(file_pairs)} cặp file hợp lệ. Bắt đầu xử lý...")
-        
         for pair in file_pairs:
             process_file_pair_logic(pair, results_log)
-
         total_errors = len([line for line in results_log if line.strip().startswith('ID:')])
         results_log.append(f"\n--- HOÀN THÀNH ---")
         results_log.append(f"Tổng cộng có {total_errors} lỗi được phát hiện.")
-
     except FileNotFoundError:
-        return f"Lỗi: Thư mục '{directory_path}' không tồn tại trên server."
+        return f"Lỗi: Thư mục '{data_dir}' không tồn tại trên server."
     except Exception as e:
         return f"Lỗi không xác định xảy ra trong quá trình xử lý: {str(e)}"
-
     return "\n".join(results_log)

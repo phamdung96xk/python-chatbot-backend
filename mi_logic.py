@@ -1,4 +1,3 @@
-# mi_logic.py
 import os
 import re
 import csv
@@ -13,12 +12,46 @@ import xml.etree.ElementTree as ET
 try:
     from bs4 import BeautifulSoup
 except ImportError:
-    # This function will act as a placeholder if BeautifulSoup is not installed
     def BeautifulSoup(markup, features):
         return None
 
-# --- Helper Functions ---
+# ==== Helper chọn thư mục dữ liệu “đúng” (dùng chung) ====
+def _has_data_here(d):
+    try:
+        for f in os.listdir(d):
+            fl = f.lower()
+            if fl.endswith(".xml") or fl.endswith("_content.txt"):
+                return True
+    except Exception:
+        pass
+    return False
 
+def resolve_data_dir(base_dir: str) -> str:
+    base_dir = os.path.abspath(base_dir)
+    if os.path.isdir(base_dir) and _has_data_here(base_dir):
+        return base_dir
+    test_dir = os.path.join(base_dir, "Test")
+    if os.path.isdir(test_dir) and _has_data_here(test_dir):
+        return test_dir
+    try:
+        subs = [n for n in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, n))]
+        if len(subs) == 1:
+            child = os.path.join(base_dir, subs[0])
+            if _has_data_here(child):
+                return child
+            test2 = os.path.join(child, "Test")
+            if os.path.isdir(test2) and _has_data_here(test2):
+                return test2
+    except Exception:
+        pass
+    for cur, dirs, files in os.walk(base_dir):
+        for f in files:
+            fl = f.lower()
+            if fl.endswith(".xml") or fl.endswith("_content.txt"):
+                return cur
+    return base_dir
+
+# --- Helper Functions ---
 def decode_txt(encoded):
     try:
         if len(encoded) % 4:
@@ -29,7 +62,6 @@ def decode_txt(encoded):
         return ""
 
 def decode_nested_html_from_line(line):
-    # This simplified version is safer for server-side execution
     def _decode_once(data):
         try:
             if len(data) % 4: data += '=' * (4 - len(data) % 4)
@@ -37,25 +69,20 @@ def decode_nested_html_from_line(line):
             return gzip.decompress(decoded).decode('utf-8', errors='replace')
         except Exception:
             return None
-
     parts = line.strip().split('|')
     if len(parts) < 3: return None, None
-    
     uuid, outer_b64 = parts[0], parts[2]
     xml_str = _decode_once(outer_b64)
     if not xml_str: return uuid, None
-    
     try:
-        # Using regex which is more robust against malformed XML than ET.fromstring
         match = re.search(r'<Base64EncodedGZipCompressedContent>(.*?)</Base64EncodedGZipCompressedContent>', xml_str, re.DOTALL)
         if match:
             inner_b64 = match.group(1).strip()
             return uuid, _decode_once(inner_b64)
     except Exception:
         return uuid, None
-        
     return uuid, None
-    
+
 def parse_xml(xml_path):
     results = {}
     try:
@@ -63,7 +90,6 @@ def parse_xml(xml_path):
         root = tree.getroot()
         ns_tag = root.tag.split("}")[0].strip("{") if "}" in root.tag else ""
         ns = {"ns": ns_tag} if ns_tag else {}
-        
         for lead in root.findall(".//ns:Lead", ns) if ns else root.findall(".//Lead"):
             guid = lead.attrib.get("ID")
             fields = {val.attrib["FieldID"]: val.text for val in (lead.findall("ns:InputValue", ns) if ns else lead.findall("InputValue"))}
@@ -99,7 +125,6 @@ def extract_date_from_url(url):
     return ""
 
 # --- Checking Functions ---
-
 def check_case_status_and_category(csv_file_path, xml_filename):
     errors = []
     required_case_status = {"adjudicated", "disposed", "closed"}
@@ -111,10 +136,8 @@ def check_case_status_and_category(csv_file_path, xml_filename):
                 id_value, url = row.get("ID", ""), row.get("URL", "")
                 last_name_pos = url.find("lastName=")
                 if last_name_pos == -1: continue
-                
                 case_status_matches = re.findall(r"caseStatus=([^&]+)", url)
                 case_type_subcategory_matches = re.findall(r"caseTypeSubCategory=([^&]+)", url)
-                
                 if (required_case_status != set(case_status_matches) or 
                     required_case_type_subcategory != set(case_type_subcategory_matches)):
                     errors.append(f"ID: {id_value} | Tích thiếu hoặc sai caseStatus và caseTypeSubCategory")
@@ -170,7 +193,6 @@ def check_missing_collection(csv_file_path, content_txt_path, xml_filename):
     errors = []
     if not os.path.exists(content_txt_path):
         return [f"ID: N/A | Không tìm thấy file _content.txt để kiểm tra collection."]
-
     id_to_html = {}
     try:
         with open(content_txt_path, 'r', encoding='utf-8') as f:
@@ -180,7 +202,6 @@ def check_missing_collection(csv_file_path, content_txt_path, xml_filename):
                     id_to_html[guid] = html_content
     except Exception as e:
         return [f"ID: N/A | Lỗi khi đọc file content.txt: {e}"]
-        
     id_pages_from_csv = defaultdict(set)
     try:
         with open(csv_file_path, mode="r", encoding="utf-8-sig") as file:
@@ -192,11 +213,9 @@ def check_missing_collection(csv_file_path, content_txt_path, xml_filename):
                     except (ValueError, TypeError): pass
     except Exception as e:
         return [f"ID: N/A | Lỗi đọc file CSV: {str(e)}"]
-
     for guid, found_pages_set in id_pages_from_csv.items():
         html_content = id_to_html.get(guid)
         if not html_content or BeautifulSoup is None: continue
-        
         expected_pages = 0
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
@@ -207,33 +226,27 @@ def check_missing_collection(csv_file_path, content_txt_path, xml_filename):
                     expected_pages = math.ceil(total_records / 10)
         except Exception:
             continue
-            
         if expected_pages > 0:
             expected_page_set = set(range(1, int(expected_pages) + 1))
             if found_pages_set != expected_page_set:
                 errors.append(f"ID: {guid} | Collection thiếu (Page chuẩn = {int(expected_pages)}, Page hiện có = {len(found_pages_set)})")
-                
     return errors
 
 # --- Main Logic Function ---
-
 def run_mi_check(directory_path):
+    data_dir = resolve_data_dir(directory_path)  # <-- CHUẨN HOÁ
     results_log = []
-    xml_files = [f for f in os.listdir(directory_path) if f.endswith(".xml")]
+    xml_files = [f for f in os.listdir(data_dir) if f.endswith(".xml")]
     if not xml_files:
         return "Không tìm thấy tệp .xml trong thư mục."
-
     for xml_file in xml_files:
         base_name = os.path.splitext(xml_file)[0]
-        txt_path = os.path.join(directory_path, f"{base_name}_content.txt")
-        xml_path = os.path.join(directory_path, xml_file)
-        
+        txt_path = os.path.join(data_dir, f"{base_name}_content.txt")
+        xml_path = os.path.join(data_dir, xml_file)
         results_log.append(f"\n--- Đang xử lý: {base_name} ---")
-
         if not os.path.exists(txt_path):
             results_log.append(f"  ❌ Lỗi: Không tìm thấy tệp {os.path.basename(txt_path)}.")
             continue
-            
         # 1. Create Compare CSV
         all_rows = []
         try:
@@ -245,29 +258,23 @@ def run_mi_check(directory_path):
                     guid, _, encoded = parts
                     decoded = decode_txt(encoded)
                     if not decoded: continue
-                    
-                    xml_info = xml_data.get(guid, {})
-                    last_xml = xml_info.get("LAST_NAME_XML", "").strip().upper()
-                    date_xml = normalize_date_range(xml_info.get("DATE_XML", ""))
-                    
+                    last_xml = (xml_data.get(guid, {}).get("LAST_NAME_XML", "")).strip().upper()
+                    date_xml = normalize_date_range(xml_data.get(guid, {}).get("DATE_XML", ""))
                     uri_blocks = re.findall(r"<Uri>(.*?)</Uri>", decoded, re.DOTALL)
                     urls = [html.unescape(uri.strip()).replace("&amp;", "&") for uri in uri_blocks]
-                    
                     last_txt = ""
                     date_txt = ""
                     if urls:
                         match = re.search(r"lastName=([^&\s]+)", urls[0])
                         if match: last_txt = match.group(1).strip().upper()
                         date_txt = extract_date_from_url(urls[0])
-                        
                     for j, url in enumerate(urls, 1):
                         page_match = re.search(r"[?&]page=(\d+)", url)
                         page = page_match.group(1) if page_match else str(j)
                         check_name = "True" if last_xml == last_txt else "False"
                         check_date = "True" if date_xml == date_txt else "False"
                         all_rows.append([xml_file, guid, last_xml or last_txt, last_txt, check_name, date_xml, date_txt, check_date, str(page), url])
-
-            output_file = os.path.join(directory_path, f"{base_name}_compare_output.csv")
+            output_file = os.path.join(data_dir, f"{base_name}_compare_output.csv")
             with open(output_file, "w", encoding="utf-8-sig", newline="") as f:
                 writer = csv.writer(f, delimiter=";", lineterminator="\r\n", quoting=csv.QUOTE_ALL)
                 writer.writerow(["FILE_XML", "ID", "LAST_NAME_XML", "LAST_NAME_TXT", "CHECK_NAME", "DATE_XML", "DATE_TXT", "CHECK_DATE", "PAGE", "URL"])
@@ -275,8 +282,7 @@ def run_mi_check(directory_path):
             results_log.append(f"  ✅ Đã tạo file {os.path.basename(output_file)}")
         except Exception as e:
             results_log.append(f"  ❌ Lỗi khi tạo CSV: {e}")
-            continue # Skip to next file if CSV creation fails
-
+            continue
         # 2. Run checks on the created CSV
         file_errors = []
         file_errors.extend(check_name_in_csv(output_file, xml_file))
@@ -284,11 +290,9 @@ def run_mi_check(directory_path):
         file_errors.extend(check_duplicate_id_page(output_file, xml_file))
         file_errors.extend(check_case_status_and_category(output_file, xml_file))
         file_errors.extend(check_missing_collection(output_file, txt_path, xml_file))
-
         if not file_errors:
             results_log.append("  ✅ Không phát hiện lỗi.")
         else:
             for error in file_errors:
                 results_log.append(f"  ❌ {error}")
-
     return "\n".join(results_log)

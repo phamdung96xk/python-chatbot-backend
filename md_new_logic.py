@@ -5,6 +5,42 @@ import gzip
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
+# ==== Helper chọn thư mục dữ liệu “đúng” (dùng chung) ====
+def _has_data_here(d):
+    try:
+        for f in os.listdir(d):
+            fl = f.lower()
+            if fl.endswith(".xml") or fl.endswith("_content.txt"):
+                return True
+    except Exception:
+        pass
+    return False
+
+def resolve_data_dir(base_dir: str) -> str:
+    base_dir = os.path.abspath(base_dir)
+    if os.path.isdir(base_dir) and _has_data_here(base_dir):
+        return base_dir
+    test_dir = os.path.join(base_dir, "Test")
+    if os.path.isdir(test_dir) and _has_data_here(test_dir):
+        return test_dir
+    try:
+        subs = [n for n in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, n))]
+        if len(subs) == 1:
+            child = os.path.join(base_dir, subs[0])
+            if _has_data_here(child):
+                return child
+            test2 = os.path.join(child, "Test")
+            if os.path.isdir(test2) and _has_data_here(test2):
+                return test2
+    except Exception:
+        pass
+    for cur, dirs, files in os.walk(base_dir):
+        for f in files:
+            fl = f.lower()
+            if fl.endswith(".xml") or fl.endswith("_content.txt"):
+                return cur
+    return base_dir
+
 # ===== Helpers decode =====
 def b64_gzip_decode_best_effort(s: str) -> str:
     try:
@@ -49,8 +85,6 @@ def infer_case_type_from_filename(filename: str) -> str:
     base = os.path.basename(filename)
     name = os.path.splitext(base)[0]
     tokens = [t for t in re.split(r'[_\-]+', name) if t != ""]
-
-    # 1) Rule đặc thù cũ
     if "NameSearch" in tokens:
         idx = tokens.index("NameSearch")
         if idx > 0:
@@ -63,43 +97,33 @@ def infer_case_type_from_filename(filename: str) -> str:
             return tokens[2]
     except Exception:
         pass
-
-    # 2) Rule mới: ALLCASETYPES / *CASETYPE(S)
     for tok in tokens:
         up = tok.upper()
         if up in ("ALLCASETYPES", "ALLCASETYPE", "ALLCASES", "ALLCASE"):
             return "ALLCASETYPES"
         if "CASETYPE" in up:
-            return tok  # giữ nguyên token nếu có chữ CASETYPE
-
-    # 3) Không đoán được
+            return tok
     return ""
 
 # ===== Main checker =====
 def run_md_moi_check(directory_path):
+    data_dir = resolve_data_dir(directory_path)  # <-- CHUẨN HOÁ
     log = []
-    xml_files = [f for f in os.listdir(directory_path) if f.lower().endswith(".xml")]
+    xml_files = [f for f in os.listdir(data_dir) if f.lower().endswith(".xml")]
     if not xml_files:
         return "Không tìm thấy tệp .xml nào trong thư mục."
-
     for xml_file in xml_files:
         base_name = os.path.splitext(xml_file)[0]
-        txt_path = os.path.join(directory_path, f"{base_name}_content.txt")
-        xml_path = os.path.join(directory_path, xml_file)
-
+        txt_path = os.path.join(data_dir, f"{base_name}_content.txt")
+        xml_path = os.path.join(data_dir, xml_file)
         log.append(f"\n--- Đang xử lý (MD Mới): {base_name} ---")
-
         if not os.path.exists(txt_path):
             log.append(f"  ❌ Lỗi: Thiếu tệp TXT '{os.path.basename(txt_path)}'.")
             continue
-
-        # Suy luận CaseType từ tên file; nếu không được thì đặt mặc định
         case_type_from_name = infer_case_type_from_filename(xml_file)
         if not case_type_from_name:
             case_type_from_name = "ALLCASETYPES"
             log.append("  ⚠️ Không tách được Case Type từ tên file; dùng mặc định: ALLCASETYPES")
-
-        # Đọc XML (CaseKey theo Lead)
         case_keys_from_xml = {}
         try:
             tree = ET.parse(xml_path)
@@ -112,8 +136,6 @@ def run_md_moi_check(directory_path):
         except Exception as e:
             log.append(f"  ❌ Lỗi đọc XML: {e}")
             continue
-
-        # Đọc TXT và giải mã HTML theo UUID/ID
         uuid_to_html = {}
         try:
             with open(txt_path, 'r', encoding='utf-8') as f:
@@ -126,8 +148,6 @@ def run_md_moi_check(directory_path):
         except Exception as e:
             log.append(f"  ❌ Lỗi đọc file TXT: {e}")
             continue
-
-        # So khớp
         file_errors = []
         for lead_id, case_key_raw in case_keys_from_xml.items():
             html_content, decode_error = uuid_to_html.get(lead_id, (None, "Không tìm thấy ID trong TXT"))
@@ -137,24 +157,18 @@ def run_md_moi_check(directory_path):
             if not html_content:
                 file_errors.append(f"ID: {lead_id} | Lỗi: Nội dung HTML rỗng")
                 continue
-
-            # Parse CaseKey "MM/DD/YYYY-MM/DD/YYYY LAST%,FIRST%"
             case_key_match = re.search(r"([\d\/\-]{10})-([\d\/\-]{10}) (.*?)%,(.*?)%", case_key_raw)
             if not case_key_match:
-                # Không phá job nếu CaseKey không đúng định dạng
                 continue
-
             range_from_xml, range_to_xml, last_name_xml, first_name_xml = [s.strip() for s in case_key_match.groups()]
             last_name_xml += "%"
             first_name_xml += "%"
             lead_errors = []
-
             if "DATA NOT FOUND" in html_content:
                 fn_html = re.search(r'<input[^>]*name="firstName"[^>]*value="([^"]*)"[^>]*>', html_content, re.I)
                 ln_html = re.search(r'<input[^>]*name="lastName"[^>]*value="([^"]*)"[^>]*>', html_content, re.I)
                 start_html = re.search(r'<input[^>]*name="filingStart"[^>]*value="([^"]*)"[^>]*>', html_content, re.I)
                 end_html = re.search(r'<input[^>]*name="filingEnd"[^>]*value="([^"]*)"[^>]*>', html_content, re.I)
-
                 if not fn_html or fn_html.group(1).strip() != first_name_xml:
                     lead_errors.append("First Name")
                 if not ln_html or ln_html.group(1).strip() != last_name_xml:
@@ -170,7 +184,6 @@ def run_md_moi_check(directory_path):
                 fn_html = re.search(r"First Name:\s*<span[^>]*>([\w\s%]+?)</span>", html_content, re.I)
                 ln_html = re.search(r"Last Name:\s*<span[^>]*>([\w\s%]+?)</span>", html_content, re.I)
                 range_html = re.search(r"Filing Date Range:\s*<span[^>]*>([\w\s\/\- to]+?)</span>", html_content, re.I)
-
                 if not fn_html or fn_html.group(1).strip() != first_name_xml:
                     lead_errors.append("First Name")
                 if not ln_html or ln_html.group(1).strip() != last_name_xml:
@@ -185,14 +198,11 @@ def run_md_moi_check(directory_path):
                             lead_errors.append("Filing Date Range")
                     except (ValueError, IndexError):
                         lead_errors.append("Filing Date Range (invalid format)")
-
             if lead_errors:
                 file_errors.append(f"ID: {lead_id} | Lỗi sai do: {', '.join(lead_errors)}")
-
         if not file_errors:
             log.append("  ✅ Không có lỗi.")
         else:
             for err in file_errors:
                 log.append(f"  ❌ {err}")
-
     return "\n".join(log)
