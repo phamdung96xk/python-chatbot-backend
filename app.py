@@ -63,6 +63,22 @@ def _download_generic(url: str) -> bytes:
         r.raise_for_status()
         return b"".join(chunk for chunk in r.iter_content(1024 * 64) if chunk)
 
+# ===== Helper: chọn thư mục tốt nhất chứa .xml =====
+def _detect_best_data_dir(root_dir: str) -> str:
+    """Trả về thư mục phù hợp nhất để chạy tool:
+       - Nếu có .xml ngay trong root_dir -> dùng root_dir
+       - Nếu .xml nằm trong các thư mục con -> trỏ tới thư mục chứa .xml đầu tiên
+    """
+    try:
+        if glob.glob(os.path.join(root_dir, "*.xml")):
+            return root_dir
+        deep = glob.glob(os.path.join(root_dir, "**", "*.xml"), recursive=True)
+        if deep:
+            return os.path.dirname(deep[0])
+    except Exception:
+        pass
+    return root_dir
+
 # ===== Health =====
 @app.route("/api/health", methods=["GET"])
 def health():
@@ -135,9 +151,10 @@ HELP_TEXT = (
 )
 
 def _call_tool_module(module_name: str, command: str):
-    """Gọi module theo 2 bước:
+    """Gọi module theo 3 bước:
        1) run/main/handle (có tham số hoặc không)
-       2) Fallback sang run_*_check(directory_path) đang có trong các module logic
+       1.5) Nếu có URL (url=... hoặc dán trần), tải ZIP & giải nén -> gắn path=... vào command
+       2) Fallback sang run_*_check(directory_path) hiện có trong module
     """
     try:
         mod = importlib.import_module(module_name)
@@ -156,6 +173,25 @@ def _call_tool_module(module_name: str, command: str):
                 return {"ok": False, "module": module_name, "fn": fn_name,
                         "error": f"Lỗi khi gọi {module_name}.{fn_name}: {type(e).__name__}: {e}"}
 
+    # --- B1.5: nếu lệnh có URL (url=... hoặc dán trần) ---
+    murl = re.search(r"url\s*=\s*([^\s]+)", command, flags=re.I)
+    if not murl:
+        murl = re.search(r"(https?://\S+)", command, flags=re.I)  # URL trần
+    if murl:
+        url_in = murl.group(1)
+        try:
+            body = _download_google_drive(url_in) if "drive.google.com" in url_in else _download_generic(url_in)
+            tmp_zip = os.path.join(UPLOAD_DIR, f"link_{uuid.uuid4().hex}.zip")
+            with open(tmp_zip, "wb") as f:
+                f.write(body)
+            extract_dir = tempfile.mkdtemp(prefix="gd_", dir=UPLOAD_DIR)
+            with zipfile.ZipFile(tmp_zip, "r") as z:
+                z.extractall(extract_dir)
+            best_dir = _detect_best_data_dir(extract_dir)
+            command = f"{command} path={best_dir}"
+        except Exception as e:
+            return {"ok": False, "error": f"Tải/Giải nén từ URL lỗi: {type(e).__name__}: {e}"}
+
     # --- B2: fallback sang run_*_check(dir) ---
     name_map = {
         "civitek_new_logic": "run_civitek_new_check",
@@ -170,7 +206,8 @@ def _call_tool_module(module_name: str, command: str):
         try:
             # lấy thư mục dữ liệu từ lệnh: ví dụ "mi path=/tmp/uploads/batch_01"
             m = re.search(r"path\s*=\s*([^\s]+)", command, flags=re.I)
-            data_dir = m.group(1) if m else UPLOAD_DIR
+            raw_dir = m.group(1) if m else UPLOAD_DIR
+            data_dir = _detect_best_data_dir(raw_dir)
             out = check_fn(data_dir)
             return {"ok": True, "module": module_name, "fn": check_fn_name,
                     "output": out, "data_dir": data_dir}
