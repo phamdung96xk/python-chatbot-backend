@@ -1,8 +1,8 @@
 # app.py
-import os, io, zipfile, tempfile, time, uuid, re, glob, importlib, inspect, threading
+import os, io, zipfile, tempfile, time, uuid, re, glob, importlib, inspect, threading, fnmatch
 import requests
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, request, jsonify, make_response, send_file
 from flask_cors import CORS
 
 # boto3 là tùy chọn (S3 presign)
@@ -460,6 +460,167 @@ def analyze_object():
     buf.seek(0)
     result = analyze_zip_stream(buf.read())
     return jsonify({"ok": True, "key": key, "result": result})
+
+# ====== Smart delete error lines (no re-upload) ======
+ID_PAT = re.compile(r"\bID\s*:\s*([A-Za-z0-9._\-]+)", re.I)
+
+def _extract_error_ids_from_log(log_text: str):
+    ids = set()
+    for line in (log_text or "").splitlines():
+        m = ID_PAT.search(line)
+        if m:
+            ids.add(m.group(1).strip())
+    return sorted(ids)
+
+def _delete_lines_with_ids_in_file(file_path: str, ids: set[str]) -> dict:
+    removed = 0
+    kept = 0
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+        new_lines = []
+        for ln in lines:
+            ln_low = ln.lower()
+            hit = False
+            for _id in ids:
+                if ln.startswith(_id + "|") or _id.lower() in ln_low:
+                    hit = True
+                    break
+            if hit:
+                removed += 1
+            else:
+                new_lines.append(ln)
+                kept += 1
+        if removed > 0:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.writelines(new_lines)
+        return {"file": os.path.basename(file_path), "removed": removed, "kept": kept}
+    except Exception as e:
+        return {"file": os.path.basename(file_path), "error": f"{type(e).__name__}: {e}"}
+
+@app.route("/api/delete-error-lines", methods=["POST"])
+def delete_error_lines():
+    """
+    Body JSON:
+      {
+        "data_dir": "/tmp/uploads/gd_xxx",    # bắt buộc
+        "log_text": "<kết quả từ job>",       # bắt buộc, để trích ID
+        "dry_run": false                      # tùy chọn
+      }
+    """
+    data = request.get_json(silent=True) or {}
+    data_dir = data.get("data_dir")
+    log_text = data.get("log_text") or ""
+    dry_run = bool(data.get("dry_run", False))
+
+    if not data_dir or not os.path.isdir(data_dir):
+        return jsonify({"ok": False, "error": "Thiếu hoặc sai 'data_dir'."}), 400
+    ids = _extract_error_ids_from_log(log_text)
+    if not ids:
+        return jsonify({"ok": False, "error": "Không tìm thấy ID trong log. Vui lòng chạy tool trước rồi dùng chức năng này."}), 400
+
+    patterns = ["*_content.txt", "*_CONTENT.TXT", "*_Content.txt"]
+    targets = []
+    for root, dirs, files in os.walk(data_dir):
+        for name in files:
+            for pat in patterns:
+                if fnmatch.fnmatch(name, pat):
+                    targets.append(os.path.join(root, name))
+                    break
+
+    if not targets:
+        return jsonify({"ok": False, "error": "Không tìm thấy file *_content.txt trong thư mục dữ liệu."}), 400
+
+    if dry_run:
+        return jsonify({"ok": True, "dry_run": True, "ids": ids, "targets": [os.path.basename(p) for p in targets]})
+
+    ids_set = set(ids)
+    reports = []
+    total_removed = 0
+    modified_files = []
+
+    for p in targets:
+        rep = _delete_lines_with_ids_in_file(p, ids_set)
+        if isinstance(rep, dict) and rep.get("removed"):
+            total_removed += rep["removed"]
+            modified_files.append(os.path.basename(p))
+        reports.append(rep)
+
+    return jsonify({
+        "ok": True,
+        "deleted_total": total_removed,
+        "ids_count": len(ids_set),
+        "modified_files": modified_files,
+        "reports": reports
+    })
+
+# ===== Download cleaned files =====
+@app.route("/api/download-cleaned-one", methods=["GET"])
+def download_cleaned_one():
+    """
+    GET params:
+      - data_dir: thư mục dữ liệu
+      - name: tên file _content.txt cần tải (giữ nguyên tên)
+    """
+    data_dir = request.args.get("data_dir", "").strip()
+    name = request.args.get("name", "").strip()
+    if not data_dir or not os.path.isdir(data_dir):
+        return jsonify({"ok": False, "error": "Thiếu hoặc sai 'data_dir'."}), 400
+    if not name:
+        return jsonify({"ok": False, "error": "Thiếu 'name'."}), 400
+
+    file_path = os.path.join(data_dir, name)
+    if not os.path.isfile(file_path):
+        cand = None
+        low = name.lower()
+        for f in os.listdir(data_dir):
+            if f.lower() == low:
+                cand = os.path.join(data_dir, f)
+                name = f
+                break
+        if not cand:
+            return jsonify({"ok": False, "error": f"Không tìm thấy file: {name}"}), 404
+        file_path = cand
+
+    return send_file(file_path, as_attachment=True, download_name=name)
+
+@app.route("/api/download-cleaned", methods=["GET"])
+def download_cleaned_zip():
+    """
+    Tải nhiều file `_content.txt` trong 1 ZIP.
+    GET params:
+      - data_dir: bắt buộc
+      - names: danh sách tên file, ngăn cách bằng dấu phẩy (tùy chọn).
+               Nếu bỏ trống -> gom tất cả *_content.txt
+    """
+    data_dir = request.args.get("data_dir", "").strip()
+    names_param = request.args.get("names", "").strip()
+    if not data_dir or not os.path.isdir(data_dir):
+        return jsonify({"ok": False, "error": "Thiếu hoặc sai 'data_dir'."}), 400
+
+    targets = []
+    if names_param:
+        wanted = {n.strip().lower() for n in names_param.split(",") if n.strip()}
+        for f in os.listdir(data_dir):
+            if f.lower() in wanted:
+                targets.append(os.path.join(data_dir, f))
+    else:
+        for f in os.listdir(data_dir):
+            if f.lower().endswith("_content.txt"):
+                targets.append(os.path.join(data_dir, f))
+
+    if not targets:
+        return jsonify({"ok": False, "error": "Không có file để đóng gói."}), 404
+
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
+        for p in targets:
+            arcname = os.path.basename(p)  # giữ nguyên tên bên trong ZIP
+            z.write(p, arcname=arcname)
+    mem.seek(0)
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    zip_name = f"cleaned_{ts}.zip"
+    return send_file(mem, as_attachment=True, download_name=zip_name, mimetype="application/zip")
 
 # ===== Local dev =====
 if __name__ == "__main__":
