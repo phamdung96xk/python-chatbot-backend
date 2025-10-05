@@ -30,8 +30,8 @@
     .row{display:flex;gap:10px;flex-wrap:wrap;margin:8px 0}
     .grow{flex:1}
     label{display:block;margin:10px 0 6px;font-weight:600;color:var(--muted)}
-    input[type=text]{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--border);background:#fff;color:var(--fg);font-family:var(--mono)}
-    .dark input[type=text]{background:var(--soft);border-color:#2a3558}
+    input[type=text], input[type=file]{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--border);background:#fff;color:var(--fg);font-family:var(--mono)}
+    .dark input[type=text], .dark input[type=file]{background:var(--soft);border-color:#2a3558}
     input[type=text]::placeholder{color:#8a97ad}
     button{appearance:none;border:0;border-radius:10px;padding:10px 14px;background:var(--accent);color:#fff;font-weight:600;cursor:pointer}
     button.secondary{background:#7087a7;color:#fff}
@@ -63,6 +63,7 @@
     .badge{font-size:11px;border:1px solid var(--border);padding:2px 6px;border-radius:999px;margin-left:8px;color:var(--muted)}
     .help{background:#eef6ff;border:1px dashed var(--border);border-radius:10px;padding:10px;margin-top:10px;color:#0b1020;display:none}
     .dark .help{background:#0f1a36;color:#e8ecf1}
+    .dim{opacity:.8}
   </style>
 </head>
 <body>
@@ -78,6 +79,25 @@
           <span class="badge"><button id="themeBtn" class="secondary" style="padding:6px 10px;border-radius:8px">Dark/Light</button></span>
         </div>
       </div>
+    </div>
+
+    <!-- Upload ZIP lên backend (form-data) -->
+    <div class="card">
+      <h2>Upload ZIP lên server (tùy chọn)</h2>
+      <div class="row">
+        <div class="grow">
+          <label for="zipfile">Chọn file .zip (chứa .xml và *_content.txt)</label>
+          <input id="zipfile" type="file" accept=".zip" />
+          <div class="hint">Sau khi upload, server sẽ lưu file ở <span class="code">/tmp/uploads</span>. (Bản hiện tại chỉ upload — chạy tool vẫn nên dùng link Drive trực tiếp để backend tự tải & giải nén file cần.)</div>
+        </div>
+        <div>
+          <button id="uploadBtn" class="secondary">Upload</button>
+        </div>
+      </div>
+      <div id="uploadStatus" class="small muted"></div>
+      <div id="uploadSaved" class="small"></div>
+      <div class="sep"></div>
+      <div class="small dim">Mẹo tốc độ: Drive chậm, nếu được hãy dùng link tải trực tiếp (S3/R2/Supabase) để backend tải nhanh hơn.</div>
     </div>
 
     <div class="card">
@@ -141,6 +161,44 @@
       document.body.classList.toggle('dark', dark);
     });
 
+    // ==== Upload ZIP (form-data) ====
+    const uploadBtn = document.getElementById('uploadBtn');
+    const zipInput = document.getElementById('zipfile');
+    const uploadSaved = document.getElementById('uploadSaved');
+    const uploadStatus = document.getElementById('uploadStatus');
+
+    uploadBtn.addEventListener('click', async ()=>{
+      const file = zipInput.files && zipInput.files[0];
+      if (!file){ alert('Chọn 1 file .zip trước đã.'); return; }
+      uploadBtn.disabled = true; uploadStatus.textContent = 'Đang upload...'; uploadSaved.textContent='';
+
+      try{
+        const fd = new FormData();
+        fd.append('file', file, file.name);
+        const res = await fetch(api('/upload-files'), { method:'POST', body: fd });
+        const j = await res.json();
+        if (!res.ok){
+          uploadStatus.textContent = '❌ Upload lỗi.';
+          uploadSaved.textContent = (j && j.error) ? j.error : '';
+          uploadSaved.className = 'error';
+          return;
+        }
+        uploadStatus.textContent = '✅ Upload thành công.';
+        uploadSaved.className = 'success';
+        uploadSaved.textContent = `Đã lưu tại: ${j.saved_to} (server)`;
+
+        // NOTE: Hiện tại upload chỉ lưu file; để chạy tool, bạn vẫn nhập lệnh với link (khuyến khích),
+        // hoặc bổ sung endpoint "extract_uploaded_zip" phía backend để tự giải nén & trả về data_dir.
+      }catch(err){
+        uploadStatus.textContent = '❌ Upload lỗi.';
+        uploadSaved.textContent = String(err);
+        uploadSaved.className = 'error';
+      }finally{
+        uploadBtn.disabled = false;
+      }
+    });
+
+    // ==== Autocomplete (Tab/click nhận; Enter chạy lệnh) ====
     const cmdEl = document.getElementById('cmd');
     const runBtn = document.getElementById('runBtn');
     const deleteBtn = document.getElementById('deleteBtn');
@@ -154,7 +212,6 @@
     const probeBtn = document.getElementById('probeBtn');
     const probeResult = document.getElementById('probeResult');
 
-    /* ===== Autocomplete dropdown (Tab/click only). Enter = chạy lệnh ===== */
     const acList = document.getElementById('acList');
     let acIndex = -1;
 
@@ -211,7 +268,7 @@
       }
     });
 
-    // Tab nhận gợi ý; Enter chạy lệnh (không autocomplete)
+    // Tab nhận gợi ý; Enter chạy lệnh
     cmdEl.addEventListener('keydown', (e)=>{
       if (acList.style.display === 'block'){
         if (e.key === 'ArrowDown'){ e.preventDefault(); moveAC(1); }
@@ -222,8 +279,7 @@
         } else if (e.key === 'Escape'){
           hideAC();
         } else if (e.key === 'Enter'){
-          e.preventDefault();
-          runBtn.click();
+          e.preventDefault(); runBtn.click();
         }
       } else {
         if (e.key === 'Tab'){
@@ -231,8 +287,7 @@
           const m = COMMANDS.filter(c=>c.startsWith(val));
           if (m.length){ e.preventDefault(); acceptAC(m[0]); }
         } else if (e.key === 'Enter'){
-          e.preventDefault();
-          runBtn.click();
+          e.preventDefault(); runBtn.click();
         }
       }
     });
@@ -241,7 +296,7 @@
       if (!acList.contains(e.target) && e.target !== cmdEl) hideAC();
     });
 
-    /* ===== Helpers ===== */
+    /* Helpers */
     function appendLog(msg, css='') {
       if (!msg) return;
       const line = document.createElement('div');
@@ -272,7 +327,7 @@
     function showHelpBox(text){ helpBox.textContent = text || ''; helpBox.style.display = 'block'; }
     function hideHelpBox(){ helpBox.textContent = ''; helpBox.style.display = 'none'; }
 
-    /* ===== Run / Delete / Download flow ===== */
+    /* Run / Delete / Download flow */
     runBtn.addEventListener('click', async () => {
       const command = cmdEl.value.trim();
       if (!command) { alert('Nhập lệnh'); return; }
@@ -286,13 +341,13 @@
         const jobId = start.job_id;
         appendLog(`🔎 Job: ${jobId}`);
 
-        let done = false, dataDir = null, resultText = '', isHelp = false;
+        let done = false, dataDir = null, resultText = '';
         while (!done) {
           const j = await fetch(api(`/job/${jobId}`)).then(r=>r.json());
           if (j.status === 'done') {
             done = true;
             const r = j.result || {};
-            isHelp = !!r.help;                                // <-- xử lý help
+            const isHelp = !!r.help;                      // xử lý help
             resultText = (r.result ?? r.output ?? '') + '';
             dataDir = r.data_dir || null;
 
@@ -300,12 +355,9 @@
             setStatus('Hoàn tất.');
 
             if (isHelp){
-              // help chỉ hiện hướng dẫn, không trích ID/không bật xóa
               showHelpBox(resultText);
               lastJob = { data_dir:null, log_text:'' };
-              runBtn.disabled = false;
-              deleteBtn.disabled = true;
-              zipBtn.disabled = true;
+              runBtn.disabled = false; deleteBtn.disabled = true; zipBtn.disabled = true;
               return;
             }
           } else if (j.status === 'error') {
@@ -336,14 +388,20 @@
       }
     });
 
-    clearBtn.addEventListener('click', () => {
-      logsEl.innerHTML = '';
-      hideHelpBox();
-      setStatus('Đã xóa log.');
-      deleteBtn.disabled = true;
-      zipBtn.disabled = true;
+    document.querySelectorAll('.pill').forEach(p => {
+      p.addEventListener('click', () => {
+        const cmd = p.textContent.trim();
+        const cur = cmdEl.value.trim();
+        if (!cur || !cur.startsWith(cmd)) {
+          cmdEl.value = cmd + (cmd === 'help' ? '' : ' ');
+          cmdEl.focus();
+          const ev = new Event('input');
+          cmdEl.dispatchEvent(ev);
+        }
+      });
     });
 
+    const deleteBtn = document.getElementById('deleteBtn');
     deleteBtn.addEventListener('click', async () => {
       if (!lastJob.data_dir) { alert('Chưa có data_dir. Hãy chạy tool trước.'); return; }
       if (!lastJob.log_text) { alert('Chưa có log để trích ID.'); return; }
@@ -386,7 +444,7 @@
       }
     });
 
-    /* Tải ZIP file _content.txt đã sửa (nếu chỉ bấm riêng) */
+    const zipBtn = document.getElementById('zipBtn');
     zipBtn.addEventListener('click', ()=>{
       const dataDir = lastJob.data_dir;
       if (!dataDir){ alert('Chưa có dữ liệu. Hãy chạy tool trước.'); return; }
@@ -394,7 +452,17 @@
       window.open(url, "_blank");
     });
 
-    /* Phân tích link */
+    const clearBtn = document.getElementById('clearBtn');
+    clearBtn.addEventListener('click', () => {
+      logsEl.innerHTML = '';
+      hideHelpBox();
+      setStatus('Đã xóa log.');
+      deleteBtn.disabled = true;
+      zipBtn.disabled = true;
+    });
+
+    // Phân tích link
+    const probeBtn = document.getElementById('probeBtn');
     probeBtn.addEventListener('click', async () => {
       const url = probeUrlEl.value.trim();
       if (!url) { alert('Nhập link cần phân tích'); return; }
@@ -424,20 +492,6 @@
       } finally {
         probeBtn.disabled = false;
       }
-    });
-
-    /* Click gợi ý nhanh */
-    document.querySelectorAll('.pill').forEach(p => {
-      p.addEventListener('click', () => {
-        const cmd = p.textContent.trim();
-        const cur = cmdEl.value.trim();
-        if (!cur || !cur.startsWith(cmd)) {
-          cmdEl.value = cmd + (cmd === 'help' ? '' : ' ');
-          cmdEl.focus();
-          const ev = new Event('input');
-          cmdEl.dispatchEvent(ev);
-        }
-      });
     });
   </script>
 </body>

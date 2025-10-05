@@ -1,27 +1,37 @@
 # app.py
-import os, io, zipfile, tempfile, time, uuid, re, glob, importlib, inspect, threading, fnmatch
+import os, io, zipfile, tempfile, time, uuid, re, glob, importlib, inspect, threading, fnmatch, shutil
 import requests
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, make_response, send_file, redirect
 from flask_cors import CORS
+from concurrent.futures import ProcessPoolExecutor, TimeoutError
 
+# boto3 (optional, cho S3)
 try:
     import boto3  # type: ignore
 except Exception:
     boto3 = None
 
+# ================= Flask app & config =================
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500MB
 UPLOAD_DIR = "/tmp/uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# CORS (same-origin vẫn OK; để nguyên cho linh hoạt)
 CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=False)
 
+# S3 (optional)
 S3_BUCKET = os.environ.get("S3_BUCKET")
 AWS_REGION = os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-1")
 s3 = boto3.client("s3", region_name=AWS_REGION) if (boto3 and S3_BUCKET) else None
 
-JOBS = {}  # job_id -> {"status": "...", "result": ..., "error": ..., "updated": datetime}
+# ================ Job store & ProcessPool ================
+JOBS = {}  # job_id -> {"status": "queued|running|done|error", "result": ..., "error": ..., "updated": datetime}
+
+WORKERS = int(os.environ.get("WORKERS", "2"))
+JOB_TIMEOUT = int(os.environ.get("JOB_TIMEOUT", "900"))  # 15 phút
+EXEC = ProcessPoolExecutor(max_workers=WORKERS)
 
 def _gc_jobs(hours: int = 6):
     cutoff = datetime.utcnow() - timedelta(hours=hours)
@@ -30,9 +40,14 @@ def _gc_jobs(hours: int = 6):
             del JOBS[k]
 
 def _run_command_background(job_id: str, command: str):
+    """
+    Chạy command trong tiến trình riêng (CPU-bound không chặn web worker).
+    """
     try:
         JOBS[job_id] = {"status": "running", "updated": datetime.utcnow()}
-        res = route_command(command)
+        fut = EXEC.submit(route_command, command)  # chạy ở process khác
+        res = fut.result(timeout=JOB_TIMEOUT)
+        # Chuẩn hoá output cho frontend
         if res.get("ok"):
             if res.get("help"):
                 out = {"result": res.get("message"), "help": True}
@@ -46,9 +61,12 @@ def _run_command_background(job_id: str, command: str):
             JOBS[job_id] = {"status": "done", "result": out, "updated": datetime.utcnow()}
         else:
             JOBS[job_id] = {"status": "error", "error": res.get("error"), "updated": datetime.utcnow()}
+    except TimeoutError:
+        JOBS[job_id] = {"status": "error", "error": f"Timeout > {JOB_TIMEOUT}s", "updated": datetime.utcnow()}
     except Exception as e:
         JOBS[job_id] = {"status": "error", "error": f"{type(e).__name__}: {e}", "updated": datetime.utcnow()}
 
+# ================== ZIP helpers & download ==================
 def analyze_zip_stream(body_bytes: bytes) -> dict:
     t0 = time.time()
     try:
@@ -63,7 +81,6 @@ def analyze_zip_file(zip_path: str) -> dict:
     t0 = time.time()
     try:
         with zipfile.ZipFile(zip_path, "r") as z:
-            z.extractall(UPLOAD_DIR)
             names = z.namelist()
         return {"ok": True, "elapsed_sec": round(time.time()-t0, 3),
                 "summary": {"entries": len(names), "sample": names[:10]}}
@@ -80,13 +97,19 @@ def _normalize_gdrive(url: str) -> str:
     return url
 
 def _download_zip_to_file(url: str, dest_path: str):
+    """
+    - Tải ZIP 1MB/chunk (nhanh hơn).
+    - Bỏ qua HTML confirm của Google Drive nếu có.
+    - Xác thực nội dung cuối cùng là ZIP.
+    """
     is_drive = "drive.google.com" in url
     if is_drive:
         url = _normalize_gdrive(url)
 
     with requests.Session() as s:
         r = s.get(url, stream=True, allow_redirects=True, timeout=(30, 300))
-        if is_drive and "text/html" in r.headers.get("Content-Type", "").lower():
+        if is_drive and "text/html" in (r.headers.get("Content-Type", "")).lower():
+            # xử lý confirm token
             try:
                 text = r.text
                 if "confirm=" in text and "uc?export=download" in text:
@@ -96,14 +119,31 @@ def _download_zip_to_file(url: str, dest_path: str):
                         r = s.get(confirm_url, stream=True, allow_redirects=True, timeout=(30, 300))
             except Exception:
                 pass
+
         r.raise_for_status()
         with open(dest_path, "wb") as f:
-            for chunk in r.iter_content(1024 * 64):
+            for chunk in r.iter_content(1024 * 1024):  # 1MB/chunk
                 if chunk:
                     f.write(chunk)
+
     if not zipfile.is_zipfile(dest_path):
         raise ValueError("Nội dung tải về không phải file ZIP.")
 
+# ========= Chỉ extract file cần (XML & *_content.txt) =========
+def extract_needed(zippath: str, outdir: str):
+    """
+    Chỉ giải nén *.xml và *_content.txt để giảm I/O và tốc độ nhanh hơn.
+    """
+    os.makedirs(outdir, exist_ok=True)
+    with zipfile.ZipFile(zippath, "r") as z:
+        for info in z.infolist():
+            name = info.filename
+            low = name.lower()
+            # chỉ lấy .xml và *_content.txt
+            if low.endswith(".xml") or low.endswith("_content.txt"):
+                z.extract(info, path=outdir)
+
+# ================== Data-dir canonicalization ==================
 XML_PATTERNS = ["*.xml", "*.[xX][mM][lL]"]
 TXT_PATTERNS = ["*_content.txt", "*_CONTENT.TXT", "*_Content.txt"]
 
@@ -153,6 +193,7 @@ def _canonical_data_dir(root_dir: str) -> str:
         return found
     return root_dir
 
+# ================== Drive visibility probe ==================
 def _probe_drive_visibility(url: str):
     norm = _normalize_gdrive(url)
     try:
@@ -189,6 +230,7 @@ def _probe_drive_visibility(url: str):
     except Exception as e:
         return {"public": False, "reason": f"Lỗi probe: {type(e).__name__}: {e}", "normalized_url": norm}
 
+# ================== Health & OPTIONS ==================
 @app.route("/api/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "time": time.time()})
@@ -200,6 +242,7 @@ def api_options(any_path):
     resp.headers.setdefault("Access-Control-Allow-Headers", "*")
     return resp
 
+# ================== Upload (form-data) ==================
 @app.route("/api/upload-files", methods=["POST", "OPTIONS"])
 def upload_files():
     if request.method == "OPTIONS":
@@ -213,6 +256,60 @@ def upload_files():
     f.save(save_path)
     return jsonify({"status": "ok", "filename": f.filename, "saved_to": save_path})
 
+# ======= Trích xuất ZIP đã upload -> chỉ extract file cần -> trả data_dir =======
+@app.route("/api/extract-uploaded", methods=["POST"])
+def extract_uploaded():
+    """
+    JSON body:
+      - saved_to: đường dẫn tuyệt đối file zip đã upload (ưu tiên)
+      - hoặc filename: tên file trong /tmp/uploads
+    Trả về:
+      { ok: true, data_dir: "...", extracted_to: "...", summary: {...} }
+    """
+    data = request.get_json(silent=True) or {}
+    saved_to = data.get("saved_to")
+    filename = data.get("filename")
+    if not saved_to and not filename:
+        return jsonify({"ok": False, "error": "Thiếu 'saved_to' hoặc 'filename'"}), 400
+
+    if not saved_to:
+        saved_to = os.path.join(UPLOAD_DIR, filename)
+
+    if not os.path.isfile(saved_to):
+        return jsonify({"ok": False, "error": f"Không tìm thấy file: {saved_to}"}), 404
+    if not zipfile.is_zipfile(saved_to):
+        return jsonify({"ok": False, "error": "File không phải ZIP hợp lệ"}), 400
+
+    try:
+        extract_dir = tempfile.mkdtemp(prefix="ul_", dir=UPLOAD_DIR)
+        extract_needed(saved_to, extract_dir)
+        best_dir = _canonical_data_dir(extract_dir)
+
+        # tóm tắt nội dung sau extract (chỉ các file cần)
+        found_xml = []
+        found_txt = []
+        for root, dirs, files in os.walk(extract_dir):
+            for n in files:
+                nl = n.lower()
+                if nl.endswith(".xml"): found_xml.append(os.path.relpath(os.path.join(root, n), extract_dir))
+                if nl.endswith("_content.txt"): found_txt.append(os.path.relpath(os.path.join(root, n), extract_dir))
+
+        return jsonify({
+            "ok": True,
+            "saved_to": saved_to,
+            "extracted_to": extract_dir,
+            "data_dir": best_dir,
+            "summary": {
+                "xml_count": len(found_xml),
+                "txt_count": len(found_txt),
+                "xml_sample": found_xml[:10],
+                "txt_sample": found_txt[:10],
+            }
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
+
+# ======= Demo: tóm tắt ZIP từ URL + probe quyền Drive =======
 @app.route("/api/analyze-by-url", methods=["POST"])
 def analyze_by_url():
     data = request.get_json(silent=True) or {}
@@ -245,6 +342,7 @@ def analyze_by_url():
     except Exception as e:
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
 
+# ================== Dispatcher & tool mapping ==================
 TOOL_KEYWORDS = [
     (r"\bcivitek\s+new\b", "civitek_new_logic"),
     (r"\bmd\s+new\b",      "md_new_logic"),
@@ -266,11 +364,18 @@ HELP_TEXT = (
 )
 
 def _call_tool_module(module_name: str, command: str):
+    """
+    Gọi module tool theo 3 bước:
+    1) Nếu module có run/main/handle thì gọi thẳng.
+    2) Nếu lệnh có URL: tải ZIP, chỉ giải nén file cần, tự gán path= dir tốt nhất.
+    3) Nếu module có run_*_check(dir) thì gọi với data_dir đã chuẩn hoá.
+    """
     try:
         mod = importlib.import_module(module_name)
     except Exception as e:
         return {"ok": False, "error": f"Không import được module '{module_name}': {e}"}
 
+    # (1) run/main/handle
     for fn_name in ("run", "main", "handle"):
         fn = getattr(mod, fn_name, None)
         if callable(fn):
@@ -282,6 +387,7 @@ def _call_tool_module(module_name: str, command: str):
                 return {"ok": False, "module": module_name, "fn": fn_name,
                         "error": f"Lỗi khi gọi {module_name}.{fn_name}: {type(e).__name__}: {e}"}
 
+    # (2) URL -> tải & chỉ extract file cần -> auto path
     murl = re.search(r"url\s*=\s*([^\s]+)", command, flags=re.I)
     if not murl:
         murl = re.search(r"(https?://\S+)", command, flags=re.I)
@@ -290,15 +396,18 @@ def _call_tool_module(module_name: str, command: str):
         try:
             tmp_zip = os.path.join(UPLOAD_DIR, f"link_{uuid.uuid4().hex}.zip")
             _download_zip_to_file(url_in, tmp_zip)
+
             extract_dir = tempfile.mkdtemp(prefix="gd_", dir=UPLOAD_DIR)
-            with zipfile.ZipFile(tmp_zip, "r") as z:
-                z.extractall(extract_dir)
+            # CHỈ giải nén file cần (nhanh & ít I/O)
+            extract_needed(tmp_zip, extract_dir)
+
             best_dir = _canonical_data_dir(extract_dir)
             if not re.search(r"\bpath\s*=", command, flags=re.I):
                 command = f"{command} path={best_dir}"
         except Exception as e:
             return {"ok": False, "error": f"Tải/Giải nén từ URL lỗi: {type(e).__name__}: {e}"}
 
+    # (3) run_*_check(dir)
     name_map = {
         "civitek_new_logic": "run_civitek_new_check",
         "civitek_logic":     "run_civitek_check",
@@ -342,6 +451,7 @@ def route_command(command: str):
             return _call_tool_module(module_name, command)
     return {"ok": False, "error": "Không nhận dạng được tool từ lệnh. Gõ 'help' để xem hướng dẫn."}
 
+# ================== Run & Poll APIs ==================
 @app.route("/api/run-tool", methods=["POST"])
 def run_tool():
     data = request.get_json(silent=True) or {}
@@ -373,6 +483,7 @@ def get_job(job_id):
         return jsonify({"error": "Job không tồn tại"}), 404
     return jsonify(job)
 
+# ================== S3 presign & analyze (optional) ==================
 @app.route("/api/s3/presign", methods=["POST"])
 def s3_presign():
     if not s3 or not S3_BUCKET:
@@ -406,6 +517,7 @@ def analyze_object():
     result = analyze_zip_stream(buf.read())
     return jsonify({"ok": True, "key": key, "result": result})
 
+# ============ Smart delete (stream, tiết kiệm RAM) ============
 ID_PAT = re.compile(r"\bID\s*:\s*([A-Za-z0-9._\-]+)", re.I)
 
 def _extract_error_ids_from_log(log_text: str):
@@ -416,23 +528,24 @@ def _extract_error_ids_from_log(log_text: str):
             ids.add(m.group(1).strip())
     return sorted(ids)
 
-def _delete_lines_with_ids_in_file(file_path: str, ids: set[str]) -> dict:
+def _delete_lines_with_ids_in_file_stream(in_path: str, ids: set[str]) -> dict:
     removed, kept = 0, 0
+    tmp_path = in_path + ".tmp"
     try:
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()
-        new_lines = []
-        for ln in lines:
-            ln_low = ln.lower()
-            hit = any(ln.startswith(i + "|") or i.lower() in ln_low for i in ids)
-            if hit: removed += 1
-            else:   kept += 1; new_lines.append(ln)
-        if removed > 0:
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.writelines(new_lines)
-        return {"file": os.path.basename(file_path), "removed": removed, "kept": kept}
+        with open(in_path, "r", encoding="utf-8", errors="ignore") as fin, \
+             open(tmp_path, "w", encoding="utf-8") as fout:
+            for ln in fin:
+                ln_low = ln.lower()
+                hit = any(ln.startswith(i + "|") or i.lower() in ln_low for i in ids)
+                if hit: removed += 1
+                else:   kept += 1; fout.write(ln)
+        os.replace(tmp_path, in_path)
+        return {"file": os.path.basename(in_path), "removed": removed, "kept": kept}
     except Exception as e:
-        return {"file": os.path.basename(file_path), "error": f"{type(e).__name__}: {e}"}
+        try:
+            if os.path.exists(tmp_path): os.remove(tmp_path)
+        except: pass
+        return {"file": os.path.basename(in_path), "error": f"{type(e).__name__}: {e}"}
 
 @app.route("/api/delete-error-lines", methods=["POST"])
 def delete_error_lines():
@@ -463,7 +576,7 @@ def delete_error_lines():
     ids_set = set(ids)
     reports, total_removed, modified_files = [], 0, []
     for p in targets:
-        rep = _delete_lines_with_ids_in_file(p, ids_set)
+        rep = _delete_lines_with_ids_in_file_stream(p, ids_set)
         if rep.get("removed"):
             total_removed += rep["removed"]
             modified_files.append(os.path.basename(p))
@@ -477,6 +590,7 @@ def delete_error_lines():
         "reports": reports
     })
 
+# ================== Download cleaned files ==================
 @app.route("/api/download-cleaned-one", methods=["GET"])
 def download_cleaned_one():
     data_dir = request.args.get("data_dir", "").strip()
@@ -532,6 +646,7 @@ def download_cleaned_zip():
     zip_name = f"cleaned_{ts}.zip"
     return send_file(mem, as_attachment=True, download_name=zip_name, mimetype="application/zip")
 
+# ================== Serve chatbot.html (same-origin) ==================
 @app.get("/chatbot.html")
 def chatbot_page():
     return app.send_static_file("chatbot.html")
@@ -540,6 +655,7 @@ def chatbot_page():
 def index():
     return redirect("/chatbot.html")
 
+# ================== Local dev ==================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
