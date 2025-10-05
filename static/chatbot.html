@@ -7,15 +7,13 @@
   <style>
     :root{
       --bg:#f7f9fc; --fg:#0b1020; --muted:#5a6a85; --card:#ffffff; --accent:#2563eb; --danger:#e11d48; --ok:#10b981;
-      --border:#e5e9f2; --soft:#f0f4fa;
+      --border:#e5e9f2; --soft:#f0f4fa; --shadow:0 8px 24px rgba(0,0,0,.08);
       --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       --sans: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
-      --shadow: 0 8px 24px rgba(0,0,0,.08);
     }
     .dark{
       --bg:#0b1020; --fg:#e8ecf1; --muted:#aab3c5; --card:#121830; --accent:#4da3ff; --danger:#ff5c7a; --ok:#21d19f;
-      --border:#273054; --soft:#0e1430;
-      --shadow: 0 8px 24px rgba(0,0,0,.25);
+      --border:#273054; --soft:#0e1430; --shadow:0 8px 24px rgba(0,0,0,.25);
     }
     *{box-sizing:border-box}
     body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 var(--sans);}
@@ -49,9 +47,6 @@
     .error{color:var(--danger)}
     .kbd{border:1px solid var(--border);border-bottom-width:2px;border-radius:6px;padding:0 6px;display:inline-block;line-height:20px;background:#fff;font-family:var(--mono)}
     .dark .kbd{background:var(--soft);border-color:#3a456e}
-    .small{font-size:12px}
-    .code{font-family:var(--mono);background:#fff;border:1px solid var(--border);border-radius:8px;padding:6px 8px;display:inline-block}
-    .dark .code{background:var(--soft);border-color:#273054}
     .autocomplete{position:relative;}
     .ac-list{
       position:absolute;left:0;right:0;top:100%;z-index:10;background:var(--card);border:1px solid var(--border);
@@ -64,6 +59,7 @@
     .help{background:#eef6ff;border:1px dashed var(--border);border-radius:10px;padding:10px;margin-top:10px;color:#0b1020;display:none}
     .dark .help{background:#0f1a36;color:#e8ecf1}
     .dim{opacity:.8}
+    .mono{font-family:var(--mono)}
   </style>
 </head>
 <body>
@@ -81,14 +77,14 @@
       </div>
     </div>
 
-    <!-- Upload ZIP lên backend (form-data) -->
+    <!-- Upload ZIP -->
     <div class="card">
       <h2>Upload ZIP lên server (tùy chọn)</h2>
       <div class="row">
         <div class="grow">
           <label for="zipfile">Chọn file .zip (chứa .xml và *_content.txt)</label>
           <input id="zipfile" type="file" accept=".zip" />
-          <div class="hint">Sau khi upload, server sẽ lưu file ở <span class="code">/tmp/uploads</span>. (Bản hiện tại chỉ upload — chạy tool vẫn nên dùng link Drive trực tiếp để backend tự tải & giải nén file cần.)</div>
+          <div class="hint">Sau khi upload, server sẽ lưu file ở <span class="mono">/tmp/uploads</span>. Mình sẽ tự extract file cần & chèn <span class="mono">path=...</span> vào ô lệnh.</div>
         </div>
         <div>
           <button id="uploadBtn" class="secondary">Upload</button>
@@ -96,8 +92,7 @@
       </div>
       <div id="uploadStatus" class="small muted"></div>
       <div id="uploadSaved" class="small"></div>
-      <div class="sep"></div>
-      <div class="small dim">Mẹo tốc độ: Drive chậm, nếu được hãy dùng link tải trực tiếp (S3/R2/Supabase) để backend tải nhanh hơn.</div>
+      <div id="uploadExtract" class="small"></div>
     </div>
 
     <div class="card">
@@ -144,355 +139,223 @@
     </div>
   </div>
 
+  <!-- TẤT CẢ JS bọc trong IIFE để tránh biến global bị trùng -->
   <script>
-    /* Same-origin API */
-    function api(path){
-      const base = window.location.origin;
-      return base + (path.startsWith('/api') ? path : '/api' + path);
+  (()=>{
+
+    const $ = (sel)=>document.querySelector(sel);
+    const api = (path)=> window.location.origin + (path.startsWith('/api')? path: '/api'+path);
+
+    // ===== Theme
+    let __dark = false;
+    $('#themeBtn').addEventListener('click', ()=>{ __dark=!__dark; document.body.classList.toggle('dark', __dark); });
+
+    // ===== Upload + extract + prefill path
+    const upBtn = $('#uploadBtn');
+    const upInput = $('#zipfile');
+    const upStatus = $('#uploadStatus');
+    const upSaved  = $('#uploadSaved');
+    const upExtract= $('#uploadExtract');
+    const cmdEl = $('#cmd');
+
+    async function postJSON(url, body){
+      const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
+      const t = await r.text(); let j=null; try{ j = t? JSON.parse(t):{} }catch{}
+      if(!r.ok) throw new Error(`HTTP ${r.status}: ${j&&j.error? j.error: (t||'Request error')}`);
+      return j;
     }
 
-    const COMMANDS = ["civitek","civitek new","flager","mi","md","md new","help"];
-    let lastJob = { data_dir: null, log_text: "" };
-    let dark = false;
-
-    const themeBtn = document.getElementById('themeBtn');
-    themeBtn.addEventListener('click', () => {
-      dark = !dark;
-      document.body.classList.toggle('dark', dark);
-    });
-
-    // ==== Upload ZIP (form-data) ====
-    const uploadBtn = document.getElementById('uploadBtn');
-    const zipInput = document.getElementById('zipfile');
-    const uploadSaved = document.getElementById('uploadSaved');
-    const uploadStatus = document.getElementById('uploadStatus');
-
-    uploadBtn.addEventListener('click', async ()=>{
-      const file = zipInput.files && zipInput.files[0];
-      if (!file){ alert('Chọn 1 file .zip trước đã.'); return; }
-      uploadBtn.disabled = true; uploadStatus.textContent = 'Đang upload...'; uploadSaved.textContent='';
+    upBtn.addEventListener('click', async ()=>{
+      const file = upInput.files && upInput.files[0];
+      if(!file){ alert('Chọn 1 file .zip trước đã.'); return; }
+      upBtn.disabled=true; upStatus.textContent='Đang upload...'; upSaved.textContent=''; upExtract.textContent='';
 
       try{
-        const fd = new FormData();
-        fd.append('file', file, file.name);
-        const res = await fetch(api('/upload-files'), { method:'POST', body: fd });
-        const j = await res.json();
-        if (!res.ok){
-          uploadStatus.textContent = '❌ Upload lỗi.';
-          uploadSaved.textContent = (j && j.error) ? j.error : '';
-          uploadSaved.className = 'error';
-          return;
-        }
-        uploadStatus.textContent = '✅ Upload thành công.';
-        uploadSaved.className = 'success';
-        uploadSaved.textContent = `Đã lưu tại: ${j.saved_to} (server)`;
+        const fd = new FormData(); fd.append('file', file, file.name);
+        const res = await fetch(api('/upload-files'), {method:'POST', body: fd});
+        const txt = await res.text(); let data=null; try{ data = JSON.parse(txt); }catch{}
+        if(!res.ok){ upStatus.textContent='❌ Upload lỗi'; upSaved.className='error'; upSaved.textContent = data&&data.error? data.error: (txt||'(no message)'); return; }
+        upStatus.textContent='✅ Upload thành công.'; upSaved.className='success'; upSaved.textContent=`Đã lưu tại: ${data.saved_to}`;
 
-        // NOTE: Hiện tại upload chỉ lưu file; để chạy tool, bạn vẫn nhập lệnh với link (khuyến khích),
-        // hoặc bổ sung endpoint "extract_uploaded_zip" phía backend để tự giải nén & trả về data_dir.
-      }catch(err){
-        uploadStatus.textContent = '❌ Upload lỗi.';
-        uploadSaved.textContent = String(err);
-        uploadSaved.className = 'error';
-      }finally{
-        uploadBtn.disabled = false;
-      }
+        const ex = await postJSON(api('/extract-uploaded'), { saved_to: data.saved_to });
+        upExtract.className='success';
+        upExtract.textContent = `Đã giải nén tới: ${ex.data_dir}. Sẵn sàng chạy.`;
+
+        // Prefill path
+        let cur = cmdEl.value.trim();
+        if(!/(^|\s)path\s*=/.test(cur)){
+          if(cur.length && !cur.endsWith(' ')) cur += ' ';
+          cur += `path=${ex.data_dir}`;
+          cmdEl.value = cur + ' ';
+        }
+        cmdEl.focus();
+      }catch(e){
+        upStatus.textContent='❌ Lỗi'; upSaved.className='error'; upSaved.textContent=String(e);
+      }finally{ upBtn.disabled=false; }
     });
 
-    // ==== Autocomplete (Tab/click nhận; Enter chạy lệnh) ====
-    const cmdEl = document.getElementById('cmd');
-    const runBtn = document.getElementById('runBtn');
-    const deleteBtn = document.getElementById('deleteBtn');
-    const zipBtn = document.getElementById('zipBtn');
-    const clearBtn = document.getElementById('clearBtn');
-    const statusEl = document.getElementById('status');
-    const logsEl = document.getElementById('logs');
-    const helpBox = document.getElementById('helpBox');
-
-    const probeUrlEl = document.getElementById('probeUrl');
-    const probeBtn = document.getElementById('probeBtn');
-    const probeResult = document.getElementById('probeResult');
-
-    const acList = document.getElementById('acList');
-    let acIndex = -1;
+    // ===== Autocomplete
+    const COMMANDS = ["civitek","civitek new","flager","mi","md","md new","help"];
+    const acList = $('#acList'); let acIndex = -1;
 
     function showAC(items){
-      acList.innerHTML = '';
-      if (!items.length){ acList.style.display = 'none'; return; }
-      items.forEach((txt, idx)=>{
-        const div = document.createElement('div');
-        div.className = 'ac-item' + (idx===0?' active':'');
-        if (idx===0) acIndex = 0;
-        div.textContent = txt;
-        div.addEventListener('mousedown', (e)=>{ e.preventDefault(); acceptAC(txt); });
-        acList.appendChild(div);
-      });
-      acList.style.display = 'block';
+      acList.innerHTML=''; if(!items.length){ acList.style.display='none'; return; }
+      items.forEach((t,i)=>{
+        const d=document.createElement('div'); d.className='ac-item'+(i===0?' active':''); if(i===0) acIndex=0;
+        d.textContent=t; d.addEventListener('mousedown', (e)=>{ e.preventDefault(); acceptAC(t); }); acList.appendChild(d);
+      }); acList.style.display='block';
     }
-    function hideAC(){ acList.style.display = 'none'; acIndex = -1; }
-
+    function hideAC(){ acList.style.display='none'; acIndex=-1; }
+    function activeACTxt(){ const el = acList.querySelector('.ac-item.active'); return el? el.textContent: null; }
+    function moveAC(d){ const items=[...acList.querySelectorAll('.ac-item')]; if(!items.length) return; acIndex=(acIndex+d+items.length)%items.length; items.forEach((el,i)=>el.classList.toggle('active', i===acIndex)); }
     function acceptAC(txt){
-      const cur = cmdEl.value.trim();
-      const parts = cur.split(/\s+/);
-      let rest = '';
-      if (parts.length >= 2){
-        if (/^https?:\/\//i.test(parts[1])) rest = ' ' + parts.slice(1).join(' ');
-        else if (parts.length > 2) rest = ' ' + parts.slice(2).join(' ');
+      const cur = cmdEl.value.trim(); const parts = cur.split(/\s+/); let rest='';
+      if(parts.length>=2){
+        if(/^https?:\/\//i.test(parts[1])) rest=' '+parts.slice(1).join(' ');
+        else if(parts.length>2) rest=' '+parts.slice(2).join(' ');
       }
-      const suffix = (txt === 'help' || rest) ? '' : ' ';
-      cmdEl.value = txt + rest + suffix;
-      hideAC();
-      cmdEl.focus();
-    }
-
-    function moveAC(delta){
-      const items = Array.from(acList.querySelectorAll('.ac-item'));
-      if (!items.length) return;
-      acIndex = (acIndex + delta + items.length) % items.length;
-      items.forEach((el,i)=> el.classList.toggle('active', i===acIndex));
-    }
-    function activeACText(){
-      const el = acList.querySelector('.ac-item.active');
-      return el ? el.textContent : null;
+      const suffix = (txt==='help'||rest) ? '' : ' ';
+      cmdEl.value = txt + rest + suffix; hideAC(); cmdEl.focus();
     }
 
     cmdEl.addEventListener('input', ()=>{
-      const val = cmdEl.value.trim().toLowerCase();
-      if (!val){ hideAC(); return; }
-      const matches = COMMANDS.filter(c => c.startsWith(val));
-      if (!matches.length){
+      const val = cmdEl.value.trim().toLowerCase(); if(!val){ hideAC(); return; }
+      const m1 = COMMANDS.filter(c=>c.startsWith(val));
+      if(m1.length) showAC(m1);
+      else{
         const first = val.split(/\s+/).slice(0,2).join(' ');
-        const alt = COMMANDS.filter(c => c.startsWith(first));
-        showAC(alt);
-      } else {
-        showAC(matches);
+        const m2 = COMMANDS.filter(c=>c.startsWith(first)); showAC(m2);
       }
     });
-
-    // Tab nhận gợi ý; Enter chạy lệnh
     cmdEl.addEventListener('keydown', (e)=>{
-      if (acList.style.display === 'block'){
-        if (e.key === 'ArrowDown'){ e.preventDefault(); moveAC(1); }
-        else if (e.key === 'ArrowUp'){ e.preventDefault(); moveAC(-1); }
-        else if (e.key === 'Tab'){
-          const t = activeACText();
-          if (t){ e.preventDefault(); acceptAC(t); }
-        } else if (e.key === 'Escape'){
-          hideAC();
-        } else if (e.key === 'Enter'){
-          e.preventDefault(); runBtn.click();
-        }
-      } else {
-        if (e.key === 'Tab'){
-          const val = cmdEl.value.trim().toLowerCase();
-          const m = COMMANDS.filter(c=>c.startsWith(val));
-          if (m.length){ e.preventDefault(); acceptAC(m[0]); }
-        } else if (e.key === 'Enter'){
-          e.preventDefault(); runBtn.click();
-        }
+      if(acList.style.display==='block'){
+        if(e.key==='ArrowDown'){ e.preventDefault(); moveAC(1); }
+        else if(e.key==='ArrowUp'){ e.preventDefault(); moveAC(-1); }
+        else if(e.key==='Tab'){ const t=activeACTxt(); if(t){ e.preventDefault(); acceptAC(t); } }
+        else if(e.key==='Escape'){ hideAC(); }
+        else if(e.key==='Enter'){ e.preventDefault(); $('#runBtn').click(); }
+      }else{
+        if(e.key==='Tab'){
+          const v = cmdEl.value.trim().toLowerCase(); const m = COMMANDS.filter(c=>c.startsWith(v));
+          if(m.length){ e.preventDefault(); acceptAC(m[0]); }
+        }else if(e.key==='Enter'){ e.preventDefault(); $('#runBtn').click(); }
       }
     });
+    document.addEventListener('click', (e)=>{ if(!acList.contains(e.target) && e.target!==cmdEl) hideAC(); });
+    document.querySelectorAll('.pill').forEach(p=> p.addEventListener('click', ()=>{
+      const t = p.textContent.trim(); const cur = cmdEl.value.trim();
+      if(!cur || !cur.startsWith(t)){ cmdEl.value = t + (t==='help'?'':' '); cmdEl.focus(); cmdEl.dispatchEvent(new Event('input')); }
+    }));
 
-    document.addEventListener('click', (e)=>{
-      if (!acList.contains(e.target) && e.target !== cmdEl) hideAC();
-    });
+    // ===== Run / Delete / Download / Clear
+    const runBtnEl    = $('#runBtn');
+    const delBtnEl    = $('#deleteBtn');   // tên khác để chắc chắn không va chạm
+    const zipBtnEl    = $('#zipBtn');
+    const clearBtnEl  = $('#clearBtn');
+    const statusEl    = $('#status');
+    const logsEl      = $('#logs');
+    const helpBox     = $('#helpBox');
+    const probeBtn    = $('#probeBtn');
+    const probeUrlEl  = $('#probeUrl');
+    const probeResult = $('#probeResult');
 
-    /* Helpers */
-    function appendLog(msg, css='') {
-      if (!msg) return;
-      const line = document.createElement('div');
-      if (css) line.className = css;
-      line.textContent = msg;
-      logsEl.appendChild(line);
-      logsEl.scrollTop = logsEl.scrollHeight;
-    }
-    function setStatus(msg){ statusEl.textContent = msg; }
-    function extractIdsFromLog(text) {
-      const ids = new Set();
-      const re = /\bID\s*:\s*([A-Za-z0-9._\-]+)/ig;
-      let m; while ((m = re.exec(text)) !== null) ids.add(m[1]);
-      return Array.from(ids);
-    }
-    async function callJSON(url, body) {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(body || {})
-      });
-      if (!res.ok) {
-        const t = await res.text().catch(()=> 'Request error');
-        throw new Error(`HTTP ${res.status}: ${t}`);
+    let lastJob = { data_dir:null, log_text:'' };
+
+    function setStatus(m){ statusEl.textContent=m; }
+    function appendLog(msg, cls=''){ if(!msg) return; const d=document.createElement('div'); if(cls) d.className=cls; d.textContent=msg; logsEl.appendChild(d); logsEl.scrollTop=logsEl.scrollHeight; }
+    function showHelpBox(t){ helpBox.textContent=t||''; helpBox.style.display='block'; }
+    function hideHelpBox(){ helpBox.textContent=''; helpBox.style.display='none'; }
+    function idsFromLog(text){ const s=new Set(); const re=/\bID\s*:\s*([A-Za-z0-9._\-]+)/ig; let m; while((m=re.exec(text))!==null) s.add(m[1]); return [...s]; }
+
+    async function pollJob(jobId){
+      while(true){
+        const j = await fetch(api(`/job/${jobId}`)).then(r=>r.json());
+        if(j.status==='done') return j;
+        if(j.status==='error') return j;
+        await new Promise(r=>setTimeout(r, 900));
       }
-      return res.json();
     }
-    function showHelpBox(text){ helpBox.textContent = text || ''; helpBox.style.display = 'block'; }
-    function hideHelpBox(){ helpBox.textContent = ''; helpBox.style.display = 'none'; }
 
-    /* Run / Delete / Download flow */
-    runBtn.addEventListener('click', async () => {
+    runBtnEl.addEventListener('click', async ()=>{
       const command = cmdEl.value.trim();
-      if (!command) { alert('Nhập lệnh'); return; }
+      if(!command){ alert('Nhập lệnh'); return; }
+      runBtnEl.disabled=true; delBtnEl.disabled=true; zipBtnEl.disabled=true;
+      setStatus('Đang gửi lệnh...'); logsEl.innerHTML=''; hideHelpBox();
+      try{
+        const start = await postJSON(api('/run-tool-async'), { command });
+        appendLog(`🔎 Job: ${start.job_id}`);
+        const job = await pollJob(start.job_id);
+        if(job.status==='error'){ setStatus('Lỗi.'); appendLog(`❌ ${job.error||'Lỗi không xác định'}`,'error'); return; }
 
-      runBtn.disabled = true; deleteBtn.disabled = true; zipBtn.disabled = true;
-      setStatus('Đang gửi lệnh...');
-      logsEl.innerHTML = ''; hideHelpBox();
+        const r = job.result || {};
+        const isHelp = !!r.help;
+        const text = (r.result ?? r.output ?? '') + '';
+        const dataDir = r.data_dir || null;
 
-      try {
-        const start = await callJSON(api('/run-tool-async'), { command });
-        const jobId = start.job_id;
-        appendLog(`🔎 Job: ${jobId}`);
+        if(text) appendLog(text);
+        setStatus('Hoàn tất.');
+        if(isHelp){ showHelpBox(text); lastJob={data_dir:null, log_text:''}; runBtnEl.disabled=false; return; }
 
-        let done = false, dataDir = null, resultText = '';
-        while (!done) {
-          const j = await fetch(api(`/job/${jobId}`)).then(r=>r.json());
-          if (j.status === 'done') {
-            done = true;
-            const r = j.result || {};
-            const isHelp = !!r.help;                      // xử lý help
-            resultText = (r.result ?? r.output ?? '') + '';
-            dataDir = r.data_dir || null;
-
-            if (resultText) appendLog(resultText);
-            setStatus('Hoàn tất.');
-
-            if (isHelp){
-              showHelpBox(resultText);
-              lastJob = { data_dir:null, log_text:'' };
-              runBtn.disabled = false; deleteBtn.disabled = true; zipBtn.disabled = true;
-              return;
-            }
-          } else if (j.status === 'error') {
-            done = true;
-            setStatus('Lỗi.');
-            appendLog(`❌ ${j.error || 'Lỗi không xác định'}`, 'error');
-          } else {
-            setStatus('Đang xử lý...');
-            await new Promise(rs=>setTimeout(rs, 900));
-          }
-        }
-
-        lastJob = { data_dir: dataDir, log_text: resultText };
-        const ids = extractIdsFromLog(resultText);
-        deleteBtn.disabled = !(ids.length && dataDir);
-        zipBtn.disabled = !dataDir;
-
-        if (!dataDir) appendLog('⚠️ Không có data_dir từ server nên không thể xóa dòng lỗi tự động.', 'error');
+        lastJob = { data_dir: dataDir, log_text: text };
+        if(!dataDir) appendLog('⚠️ Không có data_dir từ server nên không thể xóa dòng lỗi tự động.','error');
         else appendLog(`📁 Data dir: ${dataDir}`, 'muted');
 
-        if (ids.length) appendLog(`🧾 Trích được ${ids.length} ID lỗi từ log.`);
-        else appendLog('ℹ️ Không trích được ID lỗi nào trong log.', 'muted');
-      } catch (e) {
-        appendLog(`❌ ${e.message}`, 'error');
-        setStatus('Lỗi.');
-      } finally {
-        runBtn.disabled = false;
-      }
+        const ids = idsFromLog(text);
+        delBtnEl.disabled = !(ids.length && dataDir);
+        zipBtnEl.disabled = !dataDir;
+        if(ids.length) appendLog(`🧾 Trích được ${ids.length} ID lỗi từ log.`); else appendLog('ℹ️ Không trích được ID lỗi nào trong log.','muted');
+
+      }catch(e){ appendLog(`❌ ${e.message}`,'error'); setStatus('Lỗi.'); }
+      finally{ runBtnEl.disabled=false; }
     });
 
-    document.querySelectorAll('.pill').forEach(p => {
-      p.addEventListener('click', () => {
-        const cmd = p.textContent.trim();
-        const cur = cmdEl.value.trim();
-        if (!cur || !cur.startsWith(cmd)) {
-          cmdEl.value = cmd + (cmd === 'help' ? '' : ' ');
-          cmdEl.focus();
-          const ev = new Event('input');
-          cmdEl.dispatchEvent(ev);
-        }
-      });
-    });
+    clearBtnEl.addEventListener('click', ()=>{ logsEl.innerHTML=''; hideHelpBox(); setStatus('Đã xóa log.'); delBtnEl.disabled=true; zipBtnEl.disabled=true; });
 
-    const deleteBtn = document.getElementById('deleteBtn');
-    deleteBtn.addEventListener('click', async () => {
-      if (!lastJob.data_dir) { alert('Chưa có data_dir. Hãy chạy tool trước.'); return; }
-      if (!lastJob.log_text) { alert('Chưa có log để trích ID.'); return; }
+    delBtnEl.addEventListener('click', async ()=>{
+      if(!lastJob.data_dir){ alert('Chưa có data_dir. Hãy chạy tool trước.'); return; }
+      if(!lastJob.log_text){ alert('Chưa có log để trích ID.'); return; }
+      try{
+        const dry = await postJSON(api('/delete-error-lines'), { data_dir:lastJob.data_dir, log_text:lastJob.log_text, dry_run:true });
+        const idsCount = (dry.ids||[]).length; const files = dry.targets||[];
+        if(!idsCount){ alert('Không tìm thấy ID lỗi trong log.'); return; }
+        const ok = confirm(`Sẽ xóa các dòng chứa ${idsCount} ID trong ${files.length} file:\n- ${files.join('\n- ')}\n\nBạn chắc chứ?`);
+        if(!ok) return;
 
-      try {
-        const dry = await callJSON(api('/delete-error-lines'), {
-          data_dir: lastJob.data_dir,
-          log_text: lastJob.log_text,
-          dry_run: true
-        });
-        const idsCount = (dry.ids || []).length;
-        const files = dry.targets || [];
-        if (!idsCount) { alert('Không tìm thấy ID lỗi trong log.'); return; }
-        const ok = confirm(`Sẽ xóa các dòng chứa ${idsCount} ID trong ${files.length} file:\n- ${files.join('\n- ')}\n\nBạn chắc chắn?`);
-        if (!ok) return;
-
-        const res = await callJSON(api('/delete-error-lines'), {
-          data_dir: lastJob.data_dir,
-          log_text: lastJob.log_text,
-          dry_run: false
-        });
+        const res = await postJSON(api('/delete-error-lines'), { data_dir:lastJob.data_dir, log_text:lastJob.log_text, dry_run:false });
         appendLog(`✅ Đã xóa: ${res.deleted_total} dòng trong ${res.reports.length} file.`, 'success');
-        res.reports.forEach(r => {
-          if (r.error) appendLog(`• ${r.file}: ${r.error}`, 'error');
-          else appendLog(`• ${r.file}: removed ${r.removed}, kept ${r.kept}`);
-        });
-
-        const modified = res.modified_files || [];
-        if (modified.length === 1) {
+        res.reports.forEach(r=>{ if(r.error) appendLog(`• ${r.file}: ${r.error}`, 'error'); else appendLog(`• ${r.file}: removed ${r.removed}, kept ${r.kept}`); });
+        const modified = res.modified_files||[];
+        if(modified.length===1){
           const url = api(`/api/download-cleaned-one?data_dir=${encodeURIComponent(lastJob.data_dir)}&name=${encodeURIComponent(modified[0])}`);
-          window.open(url, "_blank");
-        } else if (modified.length > 1) {
-          const url = api(`/api/download-cleaned?data_dir=${encodeURIComponent(lastJob.data_dir)}&names=${encodeURIComponent(modified.join(","))}`);
-          window.open(url, "_blank");
-        } else {
-          appendLog('ℹ️ Không có file nào thay đổi (có thể không line nào khớp ID).', 'muted');
-        }
-      } catch (e) {
-        appendLog(`❌ ${e.message}`, 'error');
-      }
+          window.open(url,'_blank');
+        }else if(modified.length>1){
+          const url = api(`/api/download-cleaned?data_dir=${encodeURIComponent(lastJob.data_dir)}&names=${encodeURIComponent(modified.join(','))}`);
+          window.open(url,'_blank');
+        }else appendLog('ℹ️ Không có file nào thay đổi.','muted');
+      }catch(e){ appendLog(`❌ ${e.message}`,'error'); }
     });
 
-    const zipBtn = document.getElementById('zipBtn');
-    zipBtn.addEventListener('click', ()=>{
-      const dataDir = lastJob.data_dir;
-      if (!dataDir){ alert('Chưa có dữ liệu. Hãy chạy tool trước.'); return; }
-      const url = api(`/api/download-cleaned?data_dir=${encodeURIComponent(dataDir)}`);
-      window.open(url, "_blank");
+    zipBtnEl.addEventListener('click', ()=>{
+      const dataDir = (lastJob||{}).data_dir; if(!dataDir){ alert('Chưa có dữ liệu. Hãy chạy tool trước.'); return; }
+      window.open(api(`/api/download-cleaned?data_dir=${encodeURIComponent(dataDir)}`),'_blank');
     });
 
-    const clearBtn = document.getElementById('clearBtn');
-    clearBtn.addEventListener('click', () => {
-      logsEl.innerHTML = '';
-      hideHelpBox();
-      setStatus('Đã xóa log.');
-      deleteBtn.disabled = true;
-      zipBtn.disabled = true;
-    });
-
-    // Phân tích link
-    const probeBtn = document.getElementById('probeBtn');
-    probeBtn.addEventListener('click', async () => {
-      const url = probeUrlEl.value.trim();
-      if (!url) { alert('Nhập link cần phân tích'); return; }
-      probeBtn.disabled = true;
-      probeResult.textContent = 'Đang phân tích...';
-      try {
-        const res = await callJSON(api('/analyze-by-url'), { url });
-        const vis = res.visibility || {};
-        const ok = res.ok;
-        const lines = [];
-        lines.push(`Kết quả: ${ok ? 'OK' : 'LỖI'}`);
-        if (vis.public !== undefined) {
-          lines.push(`Quyền chia sẻ: ${vis.public ? 'Công khai / Truy cập được' : 'Không công khai'}`);
-          if (vis.reason) lines.push(`Lý do: ${vis.reason}`);
-        }
-        const sum = (res.result && res.result.summary) || {};
-        if (sum.num_entries_in_zip !== undefined) {
-          lines.push(`Số entry trong ZIP: ${sum.num_entries_in_zip}`);
-          if (sum.sample_first_10 && sum.sample_first_10.length) {
-            lines.push('Ví dụ 10 file đầu:');
-            sum.sample_first_10.forEach(n => lines.push('  - ' + n));
-          }
-        }
+    // ===== Probe link
+    probeBtn.addEventListener('click', async ()=>{
+      const url = probeUrlEl.value.trim(); if(!url){ alert('Nhập link cần phân tích'); return; }
+      probeBtn.disabled=true; probeResult.textContent='Đang phân tích...';
+      try{
+        const r = await postJSON(api('/analyze-by-url'), { url });
+        const vis = r.visibility || {}; const lines=[];
+        lines.push(`Kết quả: ${r.ok? 'OK':'LỖI'}`);
+        if(vis.public!==undefined){ lines.push(`Quyền chia sẻ: ${vis.public? 'Công khai / Truy cập được':'Không công khai'}`); if(vis.reason) lines.push(`Lý do: ${vis.reason}`); }
+        const sum = (r.result && r.result.summary) || {};
+        if(sum.num_entries_in_zip!==undefined){ lines.push(`Số entry trong ZIP: ${sum.num_entries_in_zip}`); if(sum.sample_first_10 && sum.sample_first_10.length){ lines.push('Ví dụ 10 file đầu:'); sum.sample_first_10.forEach(n=>lines.push('  - '+n)); } }
         probeResult.textContent = lines.join('\n');
-      } catch (e) {
-        probeResult.textContent = `Lỗi: ${e.message}`;
-      } finally {
-        probeBtn.disabled = false;
-      }
+      }catch(e){ probeResult.textContent = `Lỗi: ${e.message}`; } finally{ probeBtn.disabled=false; }
     });
+
+  })();
   </script>
 </body>
 </html>
