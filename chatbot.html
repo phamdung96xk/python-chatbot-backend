@@ -4,7 +4,6 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Tool Online: Chat • Upload ZIP • Google Drive Link</title>
-  <!-- Tailwind CDN (dùng http/https, đừng mở file:// để tránh UI vỡ) -->
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     .spinner{border:3px solid #e5e7eb;border-top:3px solid #3b82f6;border-radius:50%;width:20px;height:20px;animation:spin 1s linear infinite;display:inline-block}
@@ -14,27 +13,35 @@
 </head>
 <body class="bg-gray-50">
   <div class="max-w-3xl mx-auto min-h-screen flex flex-col p-4">
-    <header class="mb-4">
-      <h1 class="text-xl font-semibold">Tool Online</h1>
-      <p class="text-sm text-gray-600">Nhập lệnh, tải file ZIP, hoặc dán link Google Drive để phân tích.</p>
+    <header class="mb-4 flex items-center justify-between gap-3">
+      <div>
+        <h1 class="text-xl font-semibold">Tool Online</h1>
+        <p class="text-sm text-gray-600">Nhập lệnh, tải file ZIP, hoặc dán link Google Drive để phân tích.</p>
+      </div>
+      <div>
+        <a id="help-link" href="#" target="_blank" rel="noopener"
+           class="text-sm bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 rounded-lg">
+          Hướng dẫn sử dụng
+        </a>
+      </div>
     </header>
 
     <main class="flex-1 overflow-y-auto">
       <div id="chatbox" class="space-y-3"></div>
     </main>
 
-    <footer class="mt-4 space-y-3">
-      <!-- Hàng nhập lệnh (Chat tới /api/run-tool) -->
+    <footer class="mt-4 space-y-5">
+      <!-- Chat -->
       <div class="flex items-center gap-2">
         <input id="user-input" class="flex-1 border rounded-lg p-2 focus:outline-none focus:ring focus:border-blue-400"
-               placeholder="Nhập lệnh (ví dụ: 'mi <link>', 'civitek <link>')..." />
+               placeholder="Nhập lệnh (ví dụ: 'mi <link>', 'civitek <link>', gõ 'help' để xem hướng dẫn)..." />
         <button id="send-btn"
                 class="bg-blue-600 text-white px-3 py-2 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-400">
           Gửi
         </button>
       </div>
 
-      <!-- Hàng upload ZIP (POST /api/upload-files) -->
+      <!-- Upload ZIP -->
       <div class="flex items-center gap-2">
         <input id="file-upload" type="file" accept=".zip"
                class="block w-full text-sm text-gray-900 border border-gray-300 rounded-lg cursor-pointer bg-gray-50 focus:outline-none">
@@ -45,7 +52,7 @@
       </div>
       <p id="file-name-display" class="text-xs text-gray-500 ml-1 truncate"></p>
 
-      <!-- Hàng phân tích Google Drive link (POST /api/analyze-by-url) -->
+      <!-- Phân tích link Drive -->
       <div class="flex items-center gap-2">
         <input id="gdrive-link" class="flex-1 border rounded-lg p-2"
                placeholder="Dán link Google Drive (bật Anyone with the link)..." />
@@ -54,13 +61,42 @@
           Phân tích link
         </button>
       </div>
+
+      <!-- XÓA DÒNG LỖI TRONG *_content.txt (client-side) -->
+      <div class="rounded-xl border bg-white p-4 shadow-sm">
+        <h2 class="font-semibold mb-2">Xóa dòng lỗi trong <code>*_content.txt</code></h2>
+        <p class="text-sm text-gray-600 mb-3">
+          Chọn file <code>*_content.txt</code>, nhập danh sách ID lỗi (mỗi ID một dòng) hoặc để trống để tự lấy
+          từ tin nhắn bot gần nhất. Bấm <b>Xóa dòng lỗi</b> để nhận file đã lọc.
+        </p>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label class="text-sm text-gray-700">Chọn file *_content.txt</label>
+            <input id="badlines-file" type="file" accept=".txt"
+                   class="mt-1 block w-full text-sm text-gray-900 border border-gray-300 rounded-lg cursor-pointer bg-gray-50 focus:outline-none">
+          </div>
+          <div>
+            <label class="text-sm text-gray-700">Danh sách ID lỗi (mỗi dòng 1 ID) — có thể để trống</label>
+            <textarea id="badlines-ids" rows="4" placeholder="Ví dụ:\nID12345\nabc-xyz-999"
+                      class="mt-1 w-full border rounded-lg p-2 text-sm focus:outline-none focus:ring focus:border-blue-400"></textarea>
+          </div>
+        </div>
+        <div class="mt-3 flex items-center gap-2">
+          <button id="badlines-run"
+                  class="bg-rose-600 text-white px-3 py-2 rounded-lg hover:bg-rose-700 focus:outline-none focus:ring-2 focus:ring-rose-500">
+            Xóa dòng lỗi
+          </button>
+          <span id="badlines-status" class="text-sm text-gray-600"></span>
+        </div>
+      </div>
     </footer>
   </div>
 
   <script>
-    // ======== CẤU HÌNH ========
-    // Domain backend Render của bạn (KHÔNG có dấu / ở cuối)
+    // ======== CONFIG ========
     const BACKEND_URL = "https://python-chatbot-backend-0y5v.onrender.com";
+    const HELP_URL = "https://docs.google.com/document/d/1TnY6_Dn2Sg5DzIaXpKrUBzRIFrTy9c534mR2DMijsMg/edit?usp=sharing";
+    document.getElementById('help-link').href = HELP_URL;
 
     // ======== DOM refs ========
     const chatbox = document.getElementById('chatbox');
@@ -74,6 +110,12 @@
     const gdriveInput = document.getElementById('gdrive-link');
     const gdriveBtn   = document.getElementById('gdrive-btn');
 
+    // Xóa dòng lỗi
+    const badFileInput = document.getElementById('badlines-file');
+    const badIdsTextarea = document.getElementById('badlines-ids');
+    const badRunBtn = document.getElementById('badlines-run');
+    const badStatus = document.getElementById('badlines-status');
+
     // ======== Helpers UI ========
     function addMessage(text, sender, isHTML=false){
       const wrap=document.createElement('div');
@@ -84,7 +126,7 @@
       wrap.appendChild(bubble);
       chatbox.appendChild(wrap);
       chatbox.scrollTop = chatbox.scrollHeight;
-      return bubble; // trả về để cập nhật sau (loading → kết quả)
+      return bubble;
     }
     function makeProgressBlock(id){
       return `
@@ -97,20 +139,18 @@
       `;
     }
 
-    // ======== Utils cho async run-tool ========
+    // ======== Async helpers ========
     const delay = (ms)=>new Promise(r=>setTimeout(r, ms));
-
     async function pollJob(jobId){
       while(true){
         const r = await fetch(`${BACKEND_URL}/api/job/${jobId}`);
         if(!r.ok) throw new Error(`Poll lỗi: ${r.status}`);
         const j = await r.json();
-        if(j.status === 'done') return j.result;   // {result, module, fn, data_dir}
+        if(j.status === 'done') return j.result;
         if(j.status === 'error') throw new Error(j.error || 'Job failed');
-        await delay(2000); // đợi 2s rồi hỏi lại
+        await delay(2000);
       }
     }
-
     async function runCommand(command){
       const r = await fetch(`${BACKEND_URL}/api/run-tool`, {
         method: 'POST',
@@ -118,8 +158,6 @@
         body: JSON.stringify({ command }),
         mode: 'cors'
       });
-
-      // Server luôn trả 202 + job_id (bản backend mới). Nhưng vẫn hỗ trợ 200 cho backward compatibility.
       if(r.status === 200){
         return await r.json();
       }
@@ -132,14 +170,13 @@
       throw new Error(`HTTP ${r.status}: ${txt}`);
     }
 
-    // ======== Chat (/api/run-tool) ========
+    // ======== Chat ========
     async function handleSendCommand(){
       const command = userInput.value.trim();
       if(!command) return;
       addMessage(command, 'user');
       userInput.value=''; sendBtn.disabled=true;
 
-      // tạo bubble loading để thay thế bằng kết quả khi xong
       const loadingBubble = addMessage('<div class="flex items-center gap-2"><div class="spinner"></div><span>Đang xử lý, vui lòng đợi...</span></div>', 'bot', true);
 
       try{
@@ -153,7 +190,7 @@
       }
     }
 
-    // ======== Upload ZIP trực tiếp (/api/upload-files) ========
+    // ======== Upload ZIP ========
     function handleUploadFile(){
       const file = fileUploadInput.files[0];
       if(!file){ addMessage('Bạn chưa chọn file nào.', 'bot'); return; }
@@ -165,7 +202,7 @@
 
       const fd = new FormData(); fd.append('file', file);
       const xhr = new XMLHttpRequest();
-      xhr.open('POST', BACKEND_URL + '/api/upload-files', true); // KHÔNG set Content-Type thủ công
+      xhr.open('POST', BACKEND_URL + '/api/upload-files', true);
 
       xhr.upload.onprogress = (e)=>{
         if(e.lengthComputable){
@@ -178,7 +215,6 @@
       };
 
       xhr.onload = function(){
-        // Gỡ progress block
         chatbox.removeChild(chatbox.lastChild);
         if(xhr.status === 200){
           const resp = JSON.parse(xhr.responseText);
@@ -215,7 +251,7 @@
       fileNameDisplay.textContent=''; fileUploadInput.value='';
     }
 
-    // ======== Phân tích link Google Drive (/api/analyze-by-url) ========
+    // ======== Phân tích link Drive ========
     function extractDriveId(url){
       const m1 = url.match(/\/file\/d\/([^/]+)/); if(m1) return m1[1];
       const m2 = url.match(/[?&]id=([^&]+)/);    if(m2) return m2[1];
@@ -242,7 +278,6 @@
         });
         const data = await res.json();
 
-        // Hiển thị trạng thái công khai (visibility) nếu có
         if (data.visibility) {
           if (data.visibility.public === false) {
             addMessage('❌ Link Drive chưa công khai. Vào Google Drive → Share → General access: "Anyone with the link".', 'bot');
@@ -263,6 +298,86 @@
       }
     }
 
+    // ======== XÓA DÒNG LỖI (client-side) ========
+    function escapeRegExp(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+    // Thử lấy danh sách ID lỗi từ tin nhắn bot gần nhất (JSON hoặc text)
+    function extractIdsFromLastBotMessage(){
+      const nodes = Array.from(chatbox.children).reverse();
+      for(const row of nodes){
+        const bubble = row.querySelector('div');
+        if(!bubble) continue;
+        const isBot = bubble.className.includes('bg-gray-200');
+        if(!isBot) continue;
+
+        const raw = bubble.innerText || '';
+        // Ưu tiên parse JSON có mảng ids
+        try{
+          const jsonMatch = raw.match(/\{[\s\S]*\}/);
+          if(jsonMatch){
+            const obj = JSON.parse(jsonMatch[0]);
+            for(const key of ['error_ids','invalid_ids','failed_ids','bad_ids','ids']){
+              if(Array.isArray(obj[key]) && obj[key].length) return obj[key].map(x=>String(x).trim()).filter(Boolean);
+            }
+          }
+        }catch(_){}
+        // Fallback: bắt các chuỗi ID "dài" (chữ/số/_/-, >=6 ký tự)
+        const guess = Array.from(new Set((raw.match(/[A-Za-z0-9_-]{6,}/g) || [])));
+        if(guess.length) return guess;
+      }
+      return [];
+    }
+
+    async function handleDeleteBadLines(){
+      badStatus.textContent = '';
+      const file = badFileInput.files && badFileInput.files[0];
+      if(!file){ alert('Vui lòng chọn file *_content.txt'); return; }
+
+      // Lấy danh sách ID: ưu tiên textarea, trống thì auto từ bot message
+      let ids = badIdsTextarea.value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+      if(ids.length === 0){
+        ids = extractIdsFromLastBotMessage();
+      }
+      if(ids.length === 0){
+        alert('Không tìm được ID lỗi. Hãy dán ID vào ô nhập hoặc đảm bảo bot vừa trả danh sách trong chat.');
+        return;
+      }
+
+      // Đọc file & lọc dòng
+      try{
+        const text = await file.text();
+        const lines = text.split(/\r?\n/);
+
+        // Tạo danh sách regex “biên” để tránh xóa nhầm chuỗi con
+        const idRegexes = ids.map(id => new RegExp('(^|[^A-Za-z0-9_-])' + escapeRegExp(id) + '([^A-Za-z0-9_-]|$)'));
+
+        const filtered = [];
+        let removed = 0;
+        for(const line of lines){
+          const hit = idRegexes.some(rx => rx.test(line));
+          if(hit){ removed++; } else { filtered.push(line); }
+        }
+
+        // Tạo file tải về
+        const outName = file.name.replace(/\.txt$/i, '') + '.cleaned.txt';
+        const blob = new Blob([filtered.join('\n')], {type:'text/plain;charset=utf-8'});
+        const url = URL.createObjectURL(blob);
+
+        const a = document.createElement('a');
+        a.href = url; a.download = outName;
+        a.style.display='none';
+        document.body.appendChild(a); a.click();
+        setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 0);
+
+        addMessage(`✅ Xóa thành công: đã xóa ${removed} dòng. Tệp đã tải về: ${outName}`, 'bot');
+        badStatus.textContent = `Đã xóa ${removed} dòng.`;
+      }catch(err){
+        console.error(err);
+        addMessage('❌ Xóa thất bại: ' + (err?.message || err), 'bot');
+        badStatus.textContent = 'Xóa thất bại.';
+      }
+    }
+
     // ======== Events ========
     sendBtn.addEventListener('click', handleSendCommand);
     userInput.addEventListener('keydown', e => { if(e.key==='Enter') handleSendCommand(); });
@@ -274,8 +389,10 @@
 
     gdriveBtn.addEventListener('click', handleAnalyzeDriveLink);
 
+    badRunBtn.addEventListener('click', handleDeleteBadLines);
+
     // Lời chào
-    addMessage('Chào bạn, tôi là bot trợ lý. Hãy nhập lệnh, tải ZIP, hoặc dán link Google Drive để phân tích.', 'bot');
+    addMessage('Chào bạn, tôi là bot trợ lý. Hãy nhập lệnh, tải ZIP, hoặc dán link Google Drive để phân tích. Có thể dùng mục "Xóa dòng lỗi" để lọc nhanh *_content.txt.', 'bot');
   </script>
 </body>
 </html>

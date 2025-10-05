@@ -318,8 +318,9 @@ def _call_tool_module(module_name: str, command: str):
         "civitek_logic":     "run_civitek_check",
         "flager_logic":      "run_flager_check",
         "mi_logic":          "run_mi_check",
-        "md_logic":          "run_md_check",
-        "md_new_logic":      "run_md_new_check",
+        # ==== cập nhật map cho md* theo tên hàm hiện có ====
+        "md_logic":          "run_md_cu_check",
+        "md_new_logic":      "run_md_moi_check",
     }
     check_fn_name = name_map.get(module_name)
     if check_fn_name and hasattr(mod, check_fn_name):
