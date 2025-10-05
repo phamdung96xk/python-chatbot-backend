@@ -1,122 +1,159 @@
-# app.py
+import os
+import sys
+import subprocess
+import zipfile
+import uuid
+import shutil
+import time  # Thêm thư viện time
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import sys
-import os
 
-# --- QUAN TRỌNG: VỀ TÊN FILE LOGIC ---
-# Python yêu cầu tên file để import phải là các module hợp lệ (không chứa dấu '-', dấu '.' v.v...).
-# BẠN BẮT BUỘC PHẢI ĐỔI TÊN các file logic của mình như sau:
-# "check_civitek_3.5.py" (logic) -> đổi thành -> "civitek_logic.py"
-# "Check_Flager_v3.5.py" (logic) -> đổi thành -> "flager_logic.py"
-# "Check_MI_v19(New OK).py" (logic) -> đổi thành -> "mi_logic.py"
-# "MD_ALL.py" (logic) -> đổi thành -> "md_logic.py"
-# "Civitek_New_v3.9.5.py" (logic) -> đổi thành -> "civitek_new_logic.py"
+# --- Cấu hình cho server ---
+# Thư mục này sẽ được tạo trên Render Disk để lưu trữ dữ liệu
+DATA_DIRECTORY_ON_SERVER = "/data/data_input"
 
-# --- Import các file logic đã được tách ---
-# Server sẽ cố gắng import tất cả các file logic. Nếu file nào chưa có, nó sẽ báo lỗi
-# một cách thân thiện nhưng server vẫn sẽ chạy để bạn có thể kiểm thử các tool đã hoàn thành.
+# --- LOGIC MỚI: Chờ cho thư mục Disk được mount ---
+def wait_for_disk_mount(directory_path, timeout=60):
+    """
+    Chờ cho đến khi thư mục được chỉ định xuất hiện (được mount).
+    Hàm sẽ thử kiểm tra mỗi giây cho đến khi hết thời gian chờ.
+    """
+    start_time = time.time()
+    while not os.path.exists(directory_path):
+        if time.time() - start_time > timeout:
+            print(f"LỖI NGHIÊM TRỌNG: Thư mục disk '{directory_path}' không xuất hiện sau {timeout} giây.")
+            # Có thể thêm các hành động khác ở đây, ví dụ: thoát chương trình
+            return False
+        print(f"Đang chờ thư mục disk '{directory_path}' được mount...")
+        time.sleep(1) # Chờ 1 giây rồi thử lại
+    
+    # Nếu thư mục đã tồn tại nhưng không phải là thư mục, tạo nó
+    if not os.path.isdir(directory_path):
+        try:
+            os.makedirs(directory_path, exist_ok=True)
+            print(f"Đã tạo thư mục '{directory_path}' vì nó chưa tồn tại.")
+        except OSError as e:
+            print(f"LỖI: Không thể tạo thư mục '{directory_path}'. Lỗi: {e}")
+            return False
+            
+    print(f"Thành công: Thư mục disk '{directory_path}' đã sẵn sàng.")
+    return True
 
+# --- Chạy hàm chờ ngay khi ứng dụng khởi động ---
+if not wait_for_disk_mount(DATA_DIRECTORY_ON_SERVER):
+    # Nếu sau một thời gian chờ mà thư mục vẫn không có, có thể dừng ứng dụng
+    # để Render tự khởi động lại.
+    sys.exit("Không thể khởi động: Thư mục disk không sẵn sàng.")
+
+# --- Import các file logic xử lý ---
+# ... (Phần import giữ nguyên như cũ) ...
 try:
-    from flager_logic import run_flager_check
-except ImportError:
-    def run_flager_check(path): return "Lỗi Server: File 'flager_logic.py' chưa được tạo hoặc chưa được đổi tên."
+    import civitek_logic
+    import flager_logic
+    import mi_logic
+    import md_logic
+    import civitek_new_logic
+except ImportError as e:
+    print(f"LỖI QUAN TRỌNG: Không thể import file logic. Hãy chắc chắn rằng bạn đã đổi tên file chính xác. Lỗi: {e}")
+    sys.exit(1)
 
-try:
-    from civitek_logic import run_civitek_check
-except ImportError:
-    def run_civitek_check(path): return "Lỗi Server: File 'civitek_logic.py' chưa được tạo hoặc chưa được đổi tên."
-
-try:
-    from mi_logic import run_mi_check
-except ImportError:
-    def run_mi_check(path): return "Lỗi Server: File 'mi_logic.py' chưa được tạo hoặc chưa được đổi tên."
-
-try:
-    from md_logic import run_md_check
-except ImportError:
-    def run_md_check(path): return "Lỗi Server: File 'md_logic.py' chưa được tạo hoặc chưa được đổi tên."
-
-try:
-    from civitek_new_logic import run_civitek_new_check
-except ImportError:
-    def run_civitek_new_check(path): return "Lỗi Server: File 'civitek_new_logic.py' chưa được tạo hoặc chưa được đổi tên."
-
-
+# --- Khởi tạo Flask App ---
 app = Flask(__name__)
 CORS(app)
 
-# Thư mục chứa dữ liệu (file XML, TXT) trên server Render
-DATA_DIRECTORY_ON_SERVER = "data_input"
+# --- Các endpoint (/api/upload-files và /api/run-tool) ---
+# --- GIỮ NGUYÊN TOÀN BỘ PHẦN CODE CỦA CÁC ENDPOINT NÀY ---
+# --- KHÔNG CÓ THAY ĐỔI GÌ Ở ĐÂY ---
+@app.route('/api/upload-files', methods=['POST'])
+def upload_files():
+    if 'file' not in request.files:
+        return jsonify({'error': 'Không có file nào được gửi lên.'}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'Chưa chọn file nào.'}), 400
+
+    if file and file.filename.endswith('.zip'):
+        try:
+            batch_id = str(uuid.uuid4())[:13]
+            batch_dir = os.path.join(DATA_DIRECTORY_ON_SERVER, batch_id)
+            os.makedirs(batch_dir, exist_ok=True)
+
+            zip_path = os.path.join(batch_dir, file.filename)
+            file.save(zip_path)
+            
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(batch_dir)
+            
+            os.remove(zip_path)
+
+            return jsonify({
+                'status': 'success',
+                'message': f'Tải lên và giải nén thành công vào thư mục {batch_id}.',
+                'batch_id': batch_id
+            }), 200
+
+        except Exception as e:
+            return jsonify({'error': f'Lỗi server khi xử lý file: {str(e)}'}), 500
+    else:
+        return jsonify({'error': 'Chỉ chấp nhận file .zip'}), 400
 
 @app.route('/api/run-tool', methods=['POST'])
 def run_tool():
-    data = request.json
-    command_full = data.get('command', '').lower().strip()
+    data = request.get_json()
+    if not data or 'command' not in data:
+        return jsonify({'error': 'Yêu cầu không hợp lệ.'}), 400
 
-    if not command_full:
-        return jsonify({'error': 'Không có lệnh nào được cung cấp'}), 400
+    full_command = data['command'].strip()
+    command_parts = full_command.split()
+    
+    tool_name = command_parts[0].lower() if command_parts else ''
+    batch_id = command_parts[1] if len(command_parts) > 1 else None
 
-    response_message = ""
+    if tool_name == 'help':
+        help_text = """
+        --- Hướng dẫn sử dụng các tool ---
+        1. civitek <batch_id>
+        2. flager <batch_id>
+        3. mi <batch_id>
+        4. md <batch_id>
+        5. civiteknew <batch_id>
+        ------------------------------------
+        Lưu ý: <batch_id> là mã bạn nhận được sau khi tải file ZIP lên.
+        """
+        return jsonify({'result': help_text.strip()})
+    
+    if not batch_id:
+        return jsonify({'error': 'Lệnh không hợp lệ. Cần cung cấp Batch ID. Ví dụ: flager abc-123'}), 400
+        
+    target_directory = os.path.join(DATA_DIRECTORY_ON_SERVER, batch_id)
+    if not os.path.isdir(target_directory):
+        return jsonify({'error': f'Không tìm thấy dữ liệu cho Batch ID "{batch_id}". Vui lòng kiểm tra lại.'}), 404
 
+    result_message = ""
     try:
-        # Tách lệnh và thư mục con (nếu có)
-        parts = command_full.split()
-        command_keyword = parts[0]
-        sub_directory = parts[1] if len(parts) > 1 else ""
-
-        # Xử lý trường hợp lệnh có 2 từ như "civitek new"
-        if len(parts) > 1 and f"{parts[0]} {parts[1]}" == "civitek new":
-             command_keyword = "civitek new"
-             sub_directory = parts[2] if len(parts) > 2 else ""
-
-        target_directory = os.path.join(DATA_DIRECTORY_ON_SERVER, sub_directory)
-
-        # Kiểm tra sự tồn tại của thư mục data trước khi chạy lệnh
-        if not os.path.isdir(target_directory) and command_keyword != 'help':
-             return jsonify({'result': f"Lỗi: Không tìm thấy thư mục '{target_directory}' trên server. Hãy đảm bảo bạn đã tải dữ liệu lên và gõ đúng tên thư mục con (nếu có)."})
-
-        # --- Logic để gọi đúng tool dựa trên từ khóa ---
-        if command_keyword == "civitek":
-            response_message = run_civitek_check(target_directory)
-
-        elif command_keyword == "flager":
-            response_message = run_flager_check(target_directory)
-
-        elif command_keyword == "mi":
-            response_message = run_mi_check(target_directory)
-
-        elif command_keyword == "md":
-            response_message = run_md_check(target_directory)
-
-        elif command_keyword == "civitek new":
-             response_message = run_civitek_new_check(target_directory)
-
-        elif command_keyword == "help":
-            response_message = (
-                "Các lệnh có sẵn:\n"
-                "------------------------------------\n"
-                "civitek <thư_mục_con (tùy chọn)>\n"
-                "flager <thư_mục_con (tùy chọn)>\n"
-                "mi <thư_mục_con (tùy chọn)>\n"
-                "md <thư_mục_con (tùy chọn)>\n"
-                "civitek new <thư_mục_con (tùy chọn)>\n"
-                "------------------------------------\n"
-                "Nếu không có thư mục con, tool sẽ chạy trên thư mục data chính."
-            )
-
+        if tool_name == 'civitek':
+            result_message = civitek_logic.run_civitek_check(target_directory)
+        elif tool_name == 'flager':
+            result_message = flager_logic.run_flager_check(target_directory)
+        elif tool_name == 'mi':
+            result_message = mi_logic.run_mi_check(target_directory)
+        elif tool_name == 'md':
+            result_message = md_logic.run_md_check(target_directory)
+        elif tool_name == 'civiteknew':
+            result_message = civitek_new_logic.run_civitek_new_check(target_directory)
         else:
-            response_message = "Tool không được nhận dạng. Gõ 'help' để xem các lệnh có sẵn."
+            return jsonify({'error': f'Tool "{tool_name}" không được nhận dạng. Gõ "help" để xem danh sách.'}), 400
+        
+        return jsonify({'result': result_message})
 
+    except NameError as e:
+        print(f"Lỗi NameError: {e}. Có thể file logic chưa được import đúng.")
+        return jsonify({'error': f'Lỗi server: Tool "{tool_name}" chưa được cấu hình đúng. Vui lòng kiểm tra lại tên file logic.'}), 500
     except Exception as e:
-        response_message = f"Đã có lỗi không xác định xảy ra trong server: {str(e)}"
-
-    return jsonify({'result': response_message})
+        print(f"Đã xảy ra lỗi khi chạy tool '{tool_name}' trên thư mục '{target_directory}': {e}")
+        return jsonify({'error': f'Đã có lỗi xảy ra khi thực thi tool. Vui lòng kiểm tra logs trên server.'}), 500
 
 if __name__ == '__main__':
-    if not os.path.exists(DATA_DIRECTORY_ON_SERVER):
-        os.makedirs(DATA_DIRECTORY_ON_SERVER)
-        print(f"Đã tạo thư mục '{DATA_DIRECTORY_ON_SERVER}'. Hãy đặt dữ liệu của bạn vào đây khi chạy local.")
-
-    app.run(host='0.0.0.0', port=5000)
+    app.run(debug=True, port=5001)
 
